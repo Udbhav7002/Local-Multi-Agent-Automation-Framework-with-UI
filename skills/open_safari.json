@@ -1,0 +1,10 @@
+{
+    "skill_id": "open_safari",
+    "trigger_phrases": [
+        "open safari"
+    ],
+    "plan_json": "[\n    {\"task\": \"Open the Safari browser\", \"parallel\": false}\n]",
+    "success_count": 1,
+    "fail_count": 0,
+    "last_used": "2026-06-17T12:17:08.152463"
+}

@@ -1,0 +1,4995 @@
+
+
+========================================
+FILE: ./README.md
+========================================
+
+# Local-Multi-Agent-Automation-Framework
+
+========================================
+FILE: ./Runner.command
+========================================
+
+#!/usr/bin/env bash
+
+# Find the directory where this Runner file is located
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$DIR"
+
+# Activate the local Python virtual environment
+source venv/bin/activate
+
+# Start the Multi-Agent Framework
+venv/bin/python main.py
+
+
+========================================
+FILE: ./Runner_API.command
+========================================
+
+#!/usr/bin/env bash
+
+# Find the directory where this Runner file is located
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$DIR"
+
+# Activate the local Python virtual environment
+source venv/bin/activate
+
+# Start the Multi-Agent Framework API Server
+echo "Starting FastAPI Server on http://127.0.0.1:8000"
+echo "Use X-API-Key: local-dev-key"
+venv/bin/uvicorn api:app --host 127.0.0.1 --port 8000
+
+
+========================================
+FILE: ./agents/README.md
+========================================
+
+# Custom Agent Definitions
+
+Place `.yaml` files in this directory to define custom agents.
+See `researcher.yaml` for an example.
+
+
+========================================
+FILE: ./agents/researcher.yaml
+========================================
+
+name: "Research Agent"
+model: "qwen2.5-coder:14b"
+triggers:
+  - "research"
+  - "find information about"
+  - "look up"
+  - "investigate"
+system_prompt: |
+  You are a research assistant. When given a topic,
+  you break it down into search queries and compile findings
+  into a structured summary. Be thorough and cite your sources.
+tools:
+  - browser
+  - screenshot
+
+
+========================================
+FILE: ./api.py
+========================================
+
+"""
+Asynchronous API Layer for the Local Multi-Agent Automation Framework.
+"""
+import os
+import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
+
+from core.factory import FrameworkBuilder
+from core.config import config
+from core.logger import setup_logger
+
+logger = setup_logger("API")
+
+API_KEY = os.environ.get("AGENT_API_KEY", "local-dev-key")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header != API_KEY:
+        raise HTTPException(status_code=403, detail="Could not validate credentials")
+    return api_key_header
+
+class PromptRequest(BaseModel):
+    text: str
+
+# Global orchestrator instance
+orchestrator = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global orchestrator
+    logger.info("Initializing Framework Orchestrator for API...")
+    orchestrator = FrameworkBuilder.build_orchestrator()
+    yield
+    logger.info("Shutting down Framework Orchestrator...")
+    if hasattr(orchestrator.step_runner, "executor"):
+        await orchestrator.step_runner.executor.shutdown()
+
+app = FastAPI(
+    title="Local Multi-Agent Framework API",
+    description="Asynchronous API for triggering agent tasks remotely",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+@app.post("/prompt", status_code=202)
+async def process_prompt(request: PromptRequest, api_key: str = Depends(get_api_key)):
+    """
+    Submits a prompt to the agent framework for background processing.
+    """
+    logger.info(f"API received prompt: {request.text}")
+    # Queue the task in the background so the HTTP request doesn't block indefinitely
+    asyncio.create_task(orchestrator.process_prompt(request.text))
+    return {"status": "accepted", "message": "Task queued for execution."}
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint.
+    """
+    return {
+        "status": "healthy",
+        "manager_model": config.manager_model,
+        "worker_model": config.worker_model,
+        "vision_model": config.vision_model
+    }
+
+
+========================================
+FILE: ./core/__init__.py
+========================================
+
+"""Core package for the Multi-Agent Framework."""
+
+
+========================================
+FILE: ./core/agent_loader.py
+========================================
+
+"""
+AgentLoader — loads custom agent definitions from YAML files.
+"""
+import os
+import glob
+from dataclasses import dataclass, field
+from typing import Optional
+
+from core.logger import setup_logger
+
+logger = setup_logger("AgentLoader")
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+    logger.warning("PyYAML not installed. Custom YAML agents will not be available. Install with: pip install pyyaml")
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_AGENTS_DIR = os.path.join(_PROJECT_ROOT, "agents")
+
+
+@dataclass
+class CustomAgent:
+    """A user-defined agent loaded from a YAML file."""
+    name: str
+    model: str
+    system_prompt: str
+    triggers: list[str] = field(default_factory=list)
+    tools: list[str] = field(default_factory=list)
+    source_file: str = ""
+
+    def matches(self, user_text: str) -> bool:
+        """Check if any trigger phrase is a substring of the user's text."""
+        text_lower = user_text.lower()
+        return any(trigger.lower() in text_lower for trigger in self.triggers)
+
+
+class AgentLoader:
+    """Discovers and loads custom agents from YAML files in the agents/ directory."""
+
+    def __init__(self, agents_dir: str = _AGENTS_DIR) -> None:
+        self.agents_dir = agents_dir
+        self.agents: dict[str, CustomAgent] = {}
+        self._load_all()
+
+    def _load_all(self) -> None:
+        """Scan the agents directory and load all YAML files."""
+        if not HAS_YAML:
+            return
+
+        if not os.path.isdir(self.agents_dir):
+            os.makedirs(self.agents_dir, exist_ok=True)
+            return
+
+        for filepath in sorted(glob.glob(os.path.join(self.agents_dir, "*.yaml"))):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+
+                if not isinstance(data, dict):
+                    logger.warning("Skipping %s: not a valid YAML dict", filepath)
+                    continue
+
+                name = data.get("name", "")
+                if not name:
+                    logger.warning("Skipping %s: missing 'name' field", filepath)
+                    continue
+
+                agent = CustomAgent(
+                    name=name,
+                    model=data.get("model", ""),
+                    system_prompt=data.get("system_prompt", ""),
+                    triggers=data.get("triggers", []),
+                    tools=data.get("tools", []),
+                    source_file=filepath,
+                )
+                self.agents[name] = agent
+                logger.info("Loaded custom agent: '%s' (triggers: %s)", name, agent.triggers)
+
+            except Exception as e:
+                logger.warning("Failed to load agent from %s: %s", filepath, e)
+
+    def match(self, user_text: str) -> Optional[CustomAgent]:
+        """Find the first custom agent whose triggers match the user's text."""
+        for agent in self.agents.values():
+            if agent.matches(user_text):
+                return agent
+        return None
+
+    def get_agent_names(self) -> list[str]:
+        """Return the names of all loaded custom agents."""
+        return list(self.agents.keys())
+
+    def get_agent_summary(self) -> str:
+        """Return a summary of available custom agents for prompt injection."""
+        if not self.agents:
+            return ""
+        lines = []
+        for agent in self.agents.values():
+            tools_str = ", ".join(agent.tools) if agent.tools else "default"
+            lines.append(f"- {agent.name} (triggers: {', '.join(agent.triggers)}, tools: {tools_str})")
+        return "Available custom agents:\n" + "\n".join(lines)
+
+
+========================================
+FILE: ./core/base_agent.py
+========================================
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from core.logger import setup_logger
+from core.prompt_loader import PromptLoader
+
+logger = setup_logger("BaseAgent")
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for all core LLM agents (Planner, Worker, Critic, Router).
+    Enforces a standard initialization pattern with PromptLoader and LLM client.
+    """
+    def __init__(self, llm: Any, model_name: str, prompt_loader: PromptLoader) -> None:
+        self.llm = llm
+        self.model_name = model_name
+        self.prompt_loader = prompt_loader
+
+    def _load_prompt(self, agent_name: str, key: str = "system_prompt", **kwargs) -> str:
+        """Helper to load a prompt template for this agent."""
+        return self.prompt_loader.load(agent_name, key=key, **kwargs)
+
+    @abstractmethod
+    async def __call__(self, *args, **kwargs) -> Any:
+        """
+        Optional: Subclasses can implement a call method for a functional interface,
+        or just provide their specific semantic methods (e.g., generate_plan).
+        """
+        pass
+
+
+========================================
+FILE: ./core/config.py
+========================================
+
+"""
+Configuration module for the Local Multi-Agent Automation Framework.
+"""
+import os
+import json
+import platform
+from dataclasses import dataclass, field
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+
+@dataclass
+class Config:
+    """Central configuration for the framework."""
+    # Models
+    manager_model: str = os.getenv("MANAGER_MODEL", "llama3:latest")    # Planner model
+    worker_model: str = os.getenv("WORKER_MODEL", "llama3:latest")      # Fast local model
+    vision_model: str = os.getenv("VISION_MODEL", "llava:latest")
+
+    # Retry logic
+    max_plan_regenerations: int = int(os.getenv("MAX_PLAN_REGENERATIONS", "3"))
+    max_step_retries: int = int(os.getenv("MAX_STEP_RETRIES", "1"))
+
+    # Behavior
+    auto_continue: bool = os.getenv(
+        "AUTO_CONTINUE", "False").lower() in (
+        "true", "1", "yes", "y")
+
+    # API endpoints
+    ollama_base_url: str = os.getenv(
+        "OLLAMA_BASE_URL", "http://localhost:11434")
+
+    # Context window
+    num_ctx: int = int(os.getenv("NUM_CTX", "8192"))
+
+    # Memory settings
+    memory_success_threshold: float = float(os.getenv("MEMORY_SUCCESS_THRESHOLD", "0.15"))
+    memory_failure_threshold: float = float(os.getenv("MEMORY_FAILURE_THRESHOLD", "0.2"))
+    memory_episode_threshold: float = float(os.getenv("MEMORY_EPISODE_THRESHOLD", "0.25"))
+
+    # File paths
+    screenshots_dir: str = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "screenshots"
+    )
+
+    # Execution limits
+    cli_timeout_seconds: float = float(os.getenv("CLI_TIMEOUT", "60.0"))
+    cli_max_output_chars: int = int(os.getenv("CLI_MAX_OUTPUT", "2000"))
+    
+    # Specific action timeouts (override cli_timeout_seconds if specified)
+    action_timeouts: dict[str, float] = field(default_factory=lambda: {
+        "run_command": float(os.getenv("CLI_TIMEOUT", "60.0")),
+        "open_app": 10.0,
+        "click": 15.0,
+        "type": 15.0,
+        "hotkey": 5.0,
+        "sleep": 300.0, # allow up to 5 min sleep
+        "goto": 30.0,
+        "close_browser": 10.0
+    })
+
+    # LLM safety
+    llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT", "120.0"))
+    max_prompt_chars: int = int(os.getenv("MAX_PROMPT_CHARS", "24000"))
+
+    @property
+    def os_context(self) -> str:
+        """Auto-detect the OS and return a context string for agent prompts."""
+        system = platform.system()  # 'Darwin', 'Linux', 'Windows'
+        machine = platform.machine()  # 'arm64', 'x86_64', etc.
+
+        if system == "Darwin":
+            return (
+                f"You are running on macOS ({machine}). "
+                "Use macOS apps (Finder, Terminal, Safari, Notes, Preview) and macOS CLI tools "
+                "(open, df, diskutil, pmset, say, pbcopy, osascript). "
+                "NEVER use Windows apps (File Explorer, Command Prompt, PowerShell) or "
+                "Windows commands (wmic, dir, ipconfig)."
+            )
+        elif system == "Linux":
+            return (
+                f"You are running on Linux ({machine}). "
+                "Use Linux apps (Nautilus, gnome-terminal, Firefox) and Linux CLI tools "
+                "(df, free, lsblk, xdg-open, xdotool). "
+                "NEVER use Windows or macOS specific apps or commands."
+            )
+        elif system == "Windows":
+            return (
+                f"You are running on Windows ({machine}). "
+                "Use Windows apps (File Explorer, Command Prompt, PowerShell, Notepad) and "
+                "Windows CLI tools (wmic, dir, ipconfig, systeminfo). "
+                "NEVER use macOS or Linux specific apps or commands."
+            )
+        else:
+            return f"You are running on {system} ({machine})."
+
+    def __post_init__(self):
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "manager_model" in data:
+                    self.manager_model = data["manager_model"]
+                if "worker_model" in data:
+                    self.worker_model = data["worker_model"]
+                if "vision_model" in data:
+                    self.vision_model = data["vision_model"]
+                if "num_ctx" in data:
+                    self.num_ctx = data["num_ctx"]
+            except Exception as e:
+                print(f"Error loading settings: {e}")
+
+    def save(self):
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "manager_model": self.manager_model,
+                    "worker_model": self.worker_model,
+                    "vision_model": self.vision_model,
+                    "num_ctx": self.num_ctx
+                }, f, indent=4)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
+config = Config()
+
+
+========================================
+FILE: ./core/critic.py
+========================================
+
+"""
+Critic module for evaluating proposed execution plans.
+Ensures safety, logic, and adherence to rules before execution.
+"""
+import json
+from typing import Tuple
+from core.protocols import TaskCritic
+from core.events import SystemEvent, EventBus
+from core.logger import setup_logger
+from core.prompt_loader import PromptLoader
+from core.base_agent import BaseAgent
+
+logger = setup_logger("Critic")
+
+class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
+    """
+    Agent that verifies plans before execution for safety, efficiency, and correctness.
+    """
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus = None) -> None:
+        super().__init__(llm, model_name, prompt_loader)
+        self.event_bus = event_bus
+
+    async def __call__(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
+        return await self.verify_plan(user_task, plan_json)
+
+    async def verify_plan(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
+        """
+        Evaluates a proposed JSON plan against the user's task.
+        Ensures the plan makes logical sense and contains no inherently dangerous steps.
+        Returns (approved: bool, feedback: str)
+        """
+        system_prompt = self._load_prompt("critic")
+
+        user_prompt = f"USER TASK: {user_task}\n\nPROPOSED PLAN:\n{plan_json}"
+
+        try:
+            if self.event_bus:
+                self.event_bus.publish("agent_action", SystemEvent(
+                    source="Critic", level="INFO", message="Passing plan to Critic for evaluation..."
+                ))
+
+            content = await self.llm.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                format='json',
+            )
+
+            try:
+                result = json.loads(content)
+                is_approved = result.get('approved', False)
+                feedback = result.get('feedback', 'No feedback provided.')
+
+                if is_approved:
+                    if self.event_bus:
+                        self.event_bus.publish("agent_action", SystemEvent(
+                            source="Critic", level="SUCCESS", message="Critic approved the plan!"
+                        ))
+                else:
+                    if self.event_bus:
+                        self.event_bus.publish("agent_action", SystemEvent(
+                            source="Critic", level="WARNING", message=f"Critic rejected plan: {feedback}"
+                        ))
+
+                return is_approved, feedback
+            except json.JSONDecodeError:
+                logger.error("Critic output invalid JSON: %s", content)
+                return False, f"Critic failed to output valid JSON: {content}"
+
+        except Exception as e:
+            logger.error("Critic evaluation failed: %s", e)
+            return False, f"Critic encountered an error: {e}"
+
+
+========================================
+FILE: ./core/custom_agent_runner.py
+========================================
+
+import json
+from rich.panel import Panel
+from core.logger import setup_logger, console
+from core.agent_loader import CustomAgent
+
+logger = setup_logger("CustomAgentRunner")
+
+class CustomAgentRunner:
+    """Executes a task via a custom YAML-defined agent."""
+    def __init__(self, planner_llm, step_runner, default_model_name: str) -> None:
+        self.llm = planner_llm
+        self.step_runner = step_runner
+        self.default_model_name = default_model_name
+
+    async def run_custom_agent(self, user_text: str, agent: CustomAgent) -> bool:
+        """Returns True if successful, False otherwise."""
+        logger.info("[magenta]Custom agent '%s' generating plan...[/magenta]", agent.name)
+
+        try:
+            model = agent.model if agent.model else self.default_model_name
+            prompt = f"{agent.system_prompt}\n\nUser request: {user_text}\n\nGenerate a step-by-step plan as a JSON array of objects with 'task' keys. Example: [{{'task': 'Step 1'}}, {{'task': 'Step 2'}}]"
+
+            content = await self.llm.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": agent.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                format='json',
+            )
+
+            from core.response_parser import ResponseParser
+            plan_json = ResponseParser.clean_and_extract_json(content, shape='array')
+            steps = json.loads(plan_json)
+
+            if not isinstance(steps, list):
+                raise ValueError("Custom agent did not return a valid plan array.")
+
+            normalized = []
+            for s in steps:
+                if isinstance(s, dict) and "task" in s:
+                    normalized.append(s)
+                else:
+                    normalized.append({"task": str(s), "parallel": False})
+
+            console.print(Panel(
+                "\n".join(f"[bold]{i+1}.[/bold] {s['task']}" for i, s in enumerate(normalized)),
+                title=f"[magenta]{agent.name} Plan ({len(normalized)} steps)[/magenta]",
+                border_style="magenta"
+            ))
+
+            success, _, _ = await self.step_runner.run([s["task"] for s in normalized])
+            if success:
+                logger.info("[bold green]Custom agent '%s' completed task.[/bold green]", agent.name)
+                return True
+            else:
+                logger.warning("[bold red]Custom agent '%s' failed.[/bold red]", agent.name)
+                return False
+
+        except Exception as e:
+            logger.error("Custom agent '%s' error: %s", agent.name, e)
+            return False
+
+
+========================================
+FILE: ./core/events.py
+========================================
+
+"""
+Event Bus module for decoupled communication between components.
+Implements the Observer pattern.
+"""
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Dict, List, Any
+
+
+@dataclass
+class SystemEvent:
+    """Base class for all system events."""
+    timestamp: datetime = field(default_factory=datetime.now)
+    source: str = "System"
+    level: str = "INFO"
+    payload: Dict[str, Any] = field(default_factory=dict)
+    message: str = ""
+
+@dataclass
+class TaskStartedEvent(SystemEvent):
+    """Fired when a new user task begins processing."""
+    task_description: str = ""
+
+@dataclass
+class StepExecutedEvent(SystemEvent):
+    """Fired when an individual step (CLI, GUI, Browser) is executed."""
+    step_action: str = ""
+    step_target: str = ""
+    success: bool = False
+    feedback: str = ""
+
+@dataclass
+class TaskCompletedEvent(SystemEvent):
+    """Fired when the entire user task is completed or failed."""
+    task_description: str = ""
+    success: bool = False
+    total_duration_s: float = 0.0
+class EventBus:
+    """
+    Central event bus for the framework.
+    Allows decoupling of logging, WebSockets, and inter-agent messaging.
+    """
+    def __init__(self):
+        self._subscribers: Dict[str, List[Callable[[SystemEvent], None]]] = {}
+
+    def subscribe(self, event_type: str, callback: Callable[[SystemEvent], None]) -> None:
+        """Subscribe a callback to a specific event type."""
+        if event_type not in self._subscribers:
+            self._subscribers[event_type] = []
+        self._subscribers[event_type].append(callback)
+
+    def unsubscribe(self, event_type: str, callback: Callable[[SystemEvent], None]) -> None:
+        """Unsubscribe a callback from an event type."""
+        if event_type in self._subscribers:
+            try:
+                self._subscribers[event_type].remove(callback)
+            except ValueError:
+                pass
+
+    def publish(self, event_type: str, event: SystemEvent) -> None:
+        """Publish an event to all subscribers synchronously."""
+        if event_type in self._subscribers:
+            for callback in self._subscribers[event_type]:
+                try:
+                    callback(event)
+                except Exception as e:
+                    # Catch all so one broken subscriber doesn't crash the bus
+                    print(f"EventBus error notifying subscriber: {e}")
+
+    async def publish_async(self, event_type: str, event: SystemEvent) -> None:
+        """Publish an event, awaiting async subscribers."""
+        if event_type in self._subscribers:
+            for callback in self._subscribers[event_type]:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(event)
+                    else:
+                        callback(event)
+                except Exception as e:
+                    print(f"EventBus error notifying async subscriber: {e}")
+
+
+
+========================================
+FILE: ./core/executor/__init__.py
+========================================
+
+"""
+Executor package — Strategy-pattern decomposition of the monolithic Executor.
+
+Backward compatibility:
+    ``from core.executor import Executor``
+    still works and returns the ExecutorDispatcher class.
+"""
+from .dispatcher import ExecutorDispatcher
+
+# Re-export as "Executor" so every existing import keeps working unchanged.
+Executor = ExecutorDispatcher
+
+__all__ = ["Executor", "ExecutorDispatcher"]
+
+
+========================================
+FILE: ./core/executor/base.py
+========================================
+
+"""
+Base protocol for all executor strategies.
+"""
+from typing import Protocol, Tuple
+
+
+class BaseExecutor(Protocol):
+    """
+    Protocol that every execution strategy must implement.
+    Each strategy handles one execution method (CLI, GUI, Browser, System).
+    """
+
+    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+        """
+        Execute a single action.
+
+        Args:
+            action: The action verb (e.g. "run_command", "click", "goto").
+            target: The target/argument for the action.
+
+        Returns:
+            A tuple of (success, output_message).
+        """
+        ...
+
+
+========================================
+FILE: ./core/executor/browser_executor.py
+========================================
+
+"""
+Browser execution strategy — Playwright-based DOM automation with persistent context.
+"""
+# pylint: disable=broad-exception-caught
+import os
+from typing import Any, Optional, Tuple
+
+from core.logger import setup_logger
+
+logger = setup_logger("BrowserExecutor")
+
+
+class BrowserExecutor:
+    """
+    Manages a Playwright browser lifecycle and executes DOM-level actions
+    (goto, click_dom, type_dom) with smart URL detection and error recovery.
+    """
+
+    def __init__(self) -> None:
+        self._pw: Any = None
+        self._browser: Any = None
+        self._page: Any = None
+
+    async def __aenter__(self):
+        await self._init_browser()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.shutdown()
+
+    # ------------------------------------------------------------------
+    # Browser lifecycle
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_browser_path(browser_name: str) -> Optional[str]:
+        """Dynamically finds the browser executable path across OSes."""
+        import sys
+        import shutil
+        import os
+        
+        b_name = browser_name.lower()
+        
+        # Windows
+        if sys.platform == 'win32':
+            if b_name == 'brave':
+                path = os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe")
+                return path if os.path.exists(path) else None
+            elif b_name == 'chrome':
+                path = os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe")
+                return path if os.path.exists(path) else None
+                
+        # macOS
+        elif sys.platform == 'darwin':
+            if b_name == 'brave':
+                path = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+                return path if os.path.exists(path) else None
+            elif b_name == 'chrome':
+                path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                return path if os.path.exists(path) else None
+                
+        # Linux
+        elif sys.platform.startswith('linux'):
+            if b_name == 'brave':
+                return shutil.which('brave-browser') or shutil.which('brave')
+            elif b_name == 'chrome':
+                return shutil.which('google-chrome') or shutil.which('chrome')
+                
+        return None
+
+    async def _init_browser(self) -> None:
+        """Lazily initialize Playwright and launch a persistent browser context."""
+        if not self._pw:
+            try:
+                from playwright.async_api import async_playwright  # pylint: disable=import-outside-toplevel
+
+                self._pw = await async_playwright().start()
+
+                # __file__ is core/executor/browser_executor.py, so 3 levels up
+                _project_root = os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                )
+                profile_dir = os.path.join(_project_root, "browser_profile")
+                if not os.path.exists(profile_dir):
+                    os.makedirs(profile_dir)
+
+                brave_path = self._get_browser_path("brave")
+                if brave_path and os.path.exists(brave_path):
+                    logger.info("Launching Brave Browser with Persistent Context...")
+                    self._browser = await self._pw.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=False,
+                        executable_path=brave_path,
+                        no_viewport=True,
+                    )
+                else:
+                    logger.info("Brave not found. Launching default Chromium with Persistent Context...")
+                    self._browser = await self._pw.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=False,
+                        no_viewport=True,
+                    )
+
+                if self._browser.pages:
+                    self._page = self._browser.pages[0]
+                else:
+                    self._page = await self._browser.new_page()
+            except (ImportError, OSError, RuntimeError) as e:
+                logger.error("Failed to initialize browser: %s", e)
+                raise
+
+    async def shutdown(self) -> None:
+        """Shuts down the Playwright browser and stops the engine."""
+        try:
+            if self._browser:
+                await self._browser.close()
+            if self._pw:
+                await self._pw.stop()
+            logger.debug("Browser shutdown successful.")
+        except (OSError, RuntimeError) as e:
+            logger.error("Error during browser shutdown: %s", e)
+        finally:
+            self._pw = None
+            self._browser = None
+            self._page = None
+
+    # ------------------------------------------------------------------
+    # Strategy interface
+    # ------------------------------------------------------------------
+
+    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+        """Execute a browser action (goto, click_dom, type_dom)."""
+        return await self._execute_browser(action, target, retry=True)
+
+    # ------------------------------------------------------------------
+    # Internal implementation
+    # ------------------------------------------------------------------
+
+    async def _execute_browser(
+        self, action: str, target: str, retry: bool = True
+    ) -> Tuple[bool, str]:
+        """Executes a browser action directly in the DOM using Playwright."""
+        try:
+            await self._init_browser()
+
+            if not self._page:
+                return False, "Browser page not initialized."
+
+            if action == "goto":
+                return await self._handle_goto(target)
+
+            if action == "click_dom":
+                logger.info("Browser Click DOM: '%s'", target)
+                await self._page.click(target, timeout=10000)
+                return True, f"Clicked element matching '{target}'."
+
+            if action == "type_dom":
+                if ":::" not in target:
+                    return False, "Target for type_dom must be in format 'selector:::text'."
+                selector, text = target.split(":::", 1)
+                logger.info("Browser Type DOM: '%s' into '%s'", text, selector)
+                await self._page.fill(selector, text, timeout=10000)
+                return True, f"Typed text into '{selector}'."
+
+            logger.warning("Unsupported browser action: %s", action)
+            return False, f"Unsupported browser action: {action}"
+
+        except (ValueError, TypeError, OSError) as e:
+            err_str = str(e)
+            logger.error("Browser execution failed: %s", err_str)
+            if retry and (
+                "Connection closed" in err_str
+                or "Target closed" in err_str
+                or "has been closed" in err_str
+            ):
+                logger.warning("Connection dead. Restarting Playwright instance...")
+                await self.shutdown()
+                return await self._execute_browser(action, target, retry=False)
+            return False, f"Browser execution failed: {err_str}"
+
+    async def _handle_goto(self, target: str) -> Tuple[bool, str]:
+        """Navigate to a URL with smart URL detection and DuckDuckGo fallback."""
+        import re as _re  # pylint: disable=import-outside-toplevel
+
+        if not target:
+            target = "https://google.com"
+        if not target.startswith("http"):
+            target = "https://" + target
+
+        # Smart URL detection
+        url_body = target.replace("https://", "").replace("http://", "")
+        if " " in url_body or not _re.match(r'^[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}', url_body):
+            search_query = url_body.replace("/", " ").strip()
+            target = f"https://duckduckgo.com/?q={search_query}"
+            logger.info("Target doesn't look like a URL. Searching DuckDuckGo for: %s", search_query)
+
+        logger.info("Browser Navigating: %s", target)
+        try:
+            await self._page.goto(target, wait_until="load")
+            return True, f"Navigated to {target}."
+        except (ValueError, TypeError, OSError) as e:
+            if "ERR_NAME_NOT_RESOLVED" in str(e) or "ERR_CONNECTION_REFUSED" in str(e):
+                logger.warning("Domain not resolved. Falling back to DuckDuckGo Search...")
+                search_query = target.replace("https://", "").replace("http://", "").replace("/", " ")
+                search_url = f"https://duckduckgo.com/?q={search_query}"
+                await self._page.goto(search_url, wait_until="load")
+                return True, f"Could not resolve {target}. Executed a DuckDuckGo search instead."
+            raise
+
+
+========================================
+FILE: ./core/executor/cli_executor.py
+========================================
+
+"""
+CLI execution strategy — runs shell commands via asyncio subprocess.
+"""
+# pylint: disable=broad-exception-caught
+import asyncio
+from typing import Tuple
+
+from core.config import config
+from core.logger import setup_logger
+
+logger = setup_logger("CLIExecutor")
+
+
+class CLIExecutor:
+    """Executes native shell commands with timeout and output truncation."""
+
+    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+        """Execute a CLI command."""
+        return await self._run_command(target)
+
+    async def _run_command(self, command: str) -> Tuple[bool, str]:
+        """Executes a native command via subprocess on macOS."""
+        try:
+            logger.debug("Running CLI command: %s", command)
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=config.cli_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                logger.error(
+                    "CLI command timed out after %s seconds: %s",
+                    config.cli_timeout_seconds, command
+                )
+                return False, (
+                    f"Command failed: Timed out after "
+                    f"{int(config.cli_timeout_seconds)} seconds."
+                )
+
+            output = stdout.decode().strip()
+            error_output = stderr.decode().strip()
+
+            # Truncate extremely long outputs to prevent model context blowout
+            max_out = config.cli_max_output_chars
+            if len(output) > max_out:
+                output = output[:max_out] + "\n... [truncated]"
+            if len(error_output) > max_out:
+                error_output = error_output[:max_out] + "\n... [truncated]"
+
+            if process.returncode == 0:
+                logger.debug("CLI command succeeded: %s", output)
+                return True, output if output else "Command executed successfully with no output."
+
+            logger.error("CLI command failed (%s): %s", process.returncode, error_output)
+            return False, f"Command failed with code {process.returncode}: {error_output}"
+
+        except Exception as e:
+            logger.error("Failed to launch subprocess: %s", e)
+            return False, f"Failed to launch subprocess: {str(e)}"
+
+
+========================================
+FILE: ./core/executor/dispatcher.py
+========================================
+
+"""
+ExecutorDispatcher — routes each ActionStep to the correct strategy executor.
+Includes the SystemExecutor for sleep/open_app/close_browser actions.
+Supports auto-discovery of plugins from the plugins/ directory.
+"""
+import asyncio
+import importlib.util
+import inspect
+import os
+import traceback
+from typing import Any, Dict, Tuple, Union
+
+from core.logger import setup_logger
+from core.models import ActionStep, MethodType
+from core.config import config
+
+from .base import BaseExecutor
+
+logger = setup_logger("ExecutorDispatcher")
+
+
+class SystemExecutor:
+    """
+    Handles system-level actions (sleep, close_browser, open_app)
+    that don't fit into CLI/GUI/Browser strategies.
+    """
+
+    def __init__(self, cli_executor: BaseExecutor, browser_executor: Any) -> None:
+        self._cli = cli_executor
+        self._browser = browser_executor
+
+    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+        """Execute a system-level action."""
+        if action == "sleep":
+            try:
+                duration = float(target)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Could not parse sleep duration '%s', defaulting to 5s.", target
+                )
+                duration = 5.0
+            logger.info("System sleeping for %s seconds...", duration)
+            await asyncio.sleep(duration)
+            return True, f"Slept for {duration} seconds."
+
+        if action == "close_browser":
+            logger.info("Closing browser...")
+            await self._browser.shutdown()
+            return True, "Closed the browser."
+
+        if action == "open_app":
+            app_name = os.path.basename(target)
+            if app_name.lower().endswith('.app') or app_name.lower().endswith('.exe'):
+                app_name = os.path.splitext(app_name)[0]
+
+            logger.info("Opening application: %s...", app_name)
+            
+            import platform
+            system = platform.system()
+            if system == "Darwin":
+                cmd = f'open -a "{app_name}"'
+            elif system == "Windows":
+                cmd = f'start "" "{app_name}"'
+            else: # Linux
+                cmd = f'gtk-launch "{app_name}" || xdg-open "{app_name}"'
+                
+            return await self._cli.execute("run_command", cmd)
+
+        error_msg = f"Unknown system action: {action}"
+        logger.warning(error_msg)
+        return False, error_msg
+
+
+class ExecutorDispatcher:
+    """
+    Central dispatcher that routes each step to the appropriate strategy
+    executor based on the step's method field.
+
+    Backward compatible: ``Executor(ui_parser)`` still works.
+    """
+
+    def __init__(
+        self,
+        ui_parser: Any = None,
+        *,
+        strategies: Dict[MethodType, BaseExecutor] | None = None,
+    ) -> None:
+        if strategies is not None:
+            self._strategies: Dict[MethodType, Any] = dict(strategies)
+        else:
+            # Build default strategies — matches original Executor(ui_parser) API
+            from .cli_executor import CLIExecutor  # pylint: disable=import-outside-toplevel
+            from .gui_executor import GUIExecutor  # pylint: disable=import-outside-toplevel
+            from .browser_executor import BrowserExecutor  # pylint: disable=import-outside-toplevel
+
+            cli = CLIExecutor()
+            browser = BrowserExecutor()
+            gui = GUIExecutor(ui_parser=ui_parser)
+            system = SystemExecutor(cli_executor=cli, browser_executor=browser)
+
+            self._strategies = {
+                MethodType.CLI: cli,
+                MethodType.GUI: gui,
+                MethodType.BROWSER: browser,
+                MethodType.SYSTEM: system,
+            }
+
+        # Action-based plugin registry (action_name -> plugin_instance)
+        self._action_plugins: Dict[str, Any] = {}
+        self._load_plugins()
+
+    async def execute_step(
+        self, step: Union[Dict[str, Any], ActionStep]
+    ) -> Tuple[bool, str]:
+        """
+        Execute a single planned step.
+
+        Args:
+            step: Either a raw dict (backward compat) or an ActionStep dataclass.
+        """
+        try:
+            if isinstance(step, dict):
+                action_step = ActionStep.from_dict(step)
+            else:
+                action_step = step
+
+            from enum import Enum
+            method = action_step.method.value if isinstance(action_step.method, Enum) else action_step.method
+            action = action_step.action.value if isinstance(action_step.action, Enum) else action_step.action
+            target = action_step.target
+
+            logger.debug(
+                "Executing step - Action: %s, Target: %s, Method: %s",
+                action, target, method,
+            )
+
+            # Check action-based plugins first
+            plugin = self._action_plugins.get(action)
+            
+            # Fallback to standard method strategy
+            strategy = self._strategies.get(method)
+            
+            if plugin is None and strategy is None:
+                error_msg = f"Unknown execution method: {method}"
+                logger.warning(error_msg)
+                return False, error_msg
+
+            # Apply configurable timeout
+            timeout = config.action_timeouts.get(action, config.cli_timeout_seconds)
+
+            try:
+                if plugin is not None:
+                    return await asyncio.wait_for(plugin.execute(action, target), timeout=timeout)
+                return await asyncio.wait_for(strategy.execute(action, target), timeout=timeout)
+            except asyncio.TimeoutError:
+                error_msg = f"Action '{action}' timed out after {timeout} seconds."
+                logger.error(error_msg)
+                return False, error_msg
+
+        except Exception:
+            err_msg = traceback.format_exc()
+            logger.error("Exception during execution: %s", err_msg)
+            return False, f"Exception during execution:\n{err_msg}"
+
+    async def shutdown(self) -> None:
+        """Shuts down all strategies and plugins that have a shutdown method."""
+        all_executors = list(self._strategies.values()) + list(set(self._action_plugins.values()))
+        for executor in all_executors:
+            if hasattr(executor, 'shutdown') and callable(executor.shutdown):
+                await executor.shutdown()
+
+    def _load_plugins(self) -> None:
+        """Auto-discover and register executor plugins from the plugins/ directory."""
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        plugins_dir = os.path.join(project_root, "plugins")
+
+        if not os.path.isdir(plugins_dir):
+            return
+
+        for filename in sorted(os.listdir(plugins_dir)):
+            if not filename.endswith(".py") or filename.startswith("_"):
+                continue
+
+            module_name = filename[:-3]
+            module_path = os.path.join(plugins_dir, filename)
+
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"plugins.{module_name}", module_path
+                )
+                if spec is None or spec.loader is None:
+                    continue
+
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                # Find classes with an execute method
+                for _, obj in inspect.getmembers(module, inspect.isclass):
+                    if not hasattr(obj, 'execute') or not callable(getattr(obj, 'execute')):
+                        continue
+                    # Skip the BaseExecutor protocol itself
+                    if obj.__name__ == 'BaseExecutor':
+                        continue
+
+                    plugin_name = getattr(obj, 'PLUGIN_NAME', module_name)
+                    actions = getattr(obj, 'ACTIONS', [])
+
+                    try:
+                        instance = obj()
+                    except (ImportError, AttributeError, SyntaxError) as init_err:
+                        logger.warning("Failed to instantiate plugin '%s': %s", plugin_name, init_err)
+                        continue
+
+                    for action_name in actions:
+                        self._action_plugins[action_name] = instance
+
+                    if actions:
+                        logger.info(
+                            "Loaded plugin '%s' (actions: %s)",
+                            plugin_name, ", ".join(actions)
+                        )
+
+            except (ImportError, AttributeError, SyntaxError) as e:
+                logger.warning("Failed to load plugin '%s': %s", filename, e)
+
+
+========================================
+FILE: ./core/executor/gui_executor.py
+========================================
+
+"""
+GUI execution strategy — screen-level automation via pyautogui + OCR.
+"""
+# pylint: disable=broad-exception-caught
+import asyncio
+from typing import Any, Optional, Tuple
+
+from core.logger import setup_logger
+
+logger = setup_logger("GUIExecutor")
+
+
+class GUIExecutor:
+    """
+    Executes GUI actions (click, type, hotkey, search_start_menu) using
+    pyautogui for input simulation and an optional UIParser for OCR-based
+    element finding.
+    """
+
+    def __init__(self, ui_parser: Optional[Any] = None) -> None:
+        self.ui_parser = ui_parser
+
+    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+        """Execute a GUI action."""
+        try:
+            import pyautogui  # pylint: disable=import-outside-toplevel
+            pyautogui.FAILSAFE = True
+
+            if action == "type":
+                logger.info("Vision Typing: '%s'", target)
+                pyautogui.write(target, interval=0.05)
+                pyautogui.press('enter')
+                return True, f"Typed '{target}' and pressed enter."
+
+            if action == "hotkey":
+                logger.info("Vision Hotkey: '%s'", target)
+                key_map = {
+                    'cmd': 'command', 'command': 'command',
+                    'ctrl': 'ctrl', 'control': 'ctrl',
+                    'alt': 'alt', 'option': 'alt',
+                    'shift': 'shift',
+                    'space': 'space', 'spacebar': 'space',
+                    'enter': 'enter', 'return': 'enter',
+                    'del': 'delete', 'delete': 'delete',
+                    'esc': 'escape', 'escape': 'escape',
+                    'win': 'win', 'windows': 'win',
+                }
+                keys = [
+                    key_map.get(k.strip().lower(), k.strip().lower())
+                    for k in target.split('+')
+                ]
+                pyautogui.hotkey(*keys)
+                return True, f"Pressed hotkey {'+'.join(keys)}."
+
+            if action == "search_start_menu":
+                logger.info("Vision Spotlight Search: '%s'", target)
+                pyautogui.hotkey('command', 'space')
+                await asyncio.sleep(1.0)
+                pyautogui.write(target, interval=0.05)
+                await asyncio.sleep(1.0)
+                pyautogui.press('enter')
+                return True, f"Searched Spotlight for '{target}' and pressed enter."
+
+            # --- Actions that require OCR coordinate finding ---
+            if not self.ui_parser:
+                return False, "UI Parser not initialized for coordinate finding."
+
+            coords = self.ui_parser.find_element(target)
+            if not coords:
+                if action == "click" and "start" in target.lower():
+                    logger.info("Falling back to Command+Space for Start/Spotlight.")
+                    pyautogui.hotkey('command', 'space')
+                    return True, "Pressed Command+Space as fallback for Start button."
+                logger.warning("Could not find element '%s' on screen.", target)
+                return False, f"Could not find element '{target}' on screen."
+
+            x, y = coords
+
+            if action == "click":
+                logger.info("Vision Click at (%s, %s) for '%s'", x, y, target)
+                pyautogui.moveTo(x, y, duration=0.5)
+                pyautogui.click()
+                return True, f"Clicked on '{target}' at ({x}, {y})."
+
+            logger.warning("Unsupported GUI action: %s", action)
+            return False, f"Unsupported GUI action: {action}"
+
+        except Exception as e:
+            logger.error("GUI Execution Error: %s", e)
+            return False, f"GUI Error: {e}"
+
+
+========================================
+FILE: ./core/factory.py
+========================================
+
+"""
+FrameworkBuilder (Factory/Container) module.
+Handles dependency injection and instantiating the entire framework
+from configuration. This keeps main.py perfectly clean.
+"""
+
+from core.config import config
+from core.llm_client import OllamaClient
+from core.prompt_loader import PromptLoader
+from core.router import Router
+from core.planner import Planner
+from core.critic import Critic
+from core.worker import Worker
+from core.step_runner import StepRunner
+from core.executor import ExecutorDispatcher
+from core.safety_gate import SafetyGate
+from core.orchestrator import Orchestrator
+from core.agent_loader import AgentLoader
+from vision.verifier import VisionVerifier
+from vision.ui_parser import UIParser
+from memory.chroma_store import ChromaStore
+from memory.preferences import UserPreferences
+from memory.skill_library import SkillLibrary
+
+
+class FrameworkBuilder:
+    """IoC Container that builds the application graph."""
+
+    @staticmethod
+    def build_orchestrator() -> Orchestrator:
+        from core.events import EventBus
+        event_bus = EventBus()
+
+        # 1. LLM Client — single async instance shared by all agents
+        llm = OllamaClient(num_ctx=config.num_ctx, keep_alive=0)
+
+        # 2. Common Utilities
+        ui_parser = UIParser()
+        prompt_loader = PromptLoader()
+
+        # 3. Agents — all receive LLMClient, PromptLoader, and event_bus
+        router = Router(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
+        planner = Planner(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
+        critic = Critic(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
+        worker = Worker(llm=llm, model_name=config.worker_model, prompt_loader=prompt_loader, event_bus=event_bus)
+        verifier = VisionVerifier(llm=llm, model_name=config.vision_model, ui_parser=ui_parser)
+
+        # 4. Executor — Strategy pattern with dispatcher
+        executor = ExecutorDispatcher(ui_parser)
+
+        # 5. Safety + Step execution
+        safety_gate = SafetyGate(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader)
+        step_runner = StepRunner(
+            worker=worker,
+            executor=executor,
+            verifier=verifier,
+            safety_gate=safety_gate,
+            event_bus=event_bus
+        )
+
+        # 6. Memory & Sub-systems
+        memory = ChromaStore()
+        preferences = UserPreferences()
+        skill_library = SkillLibrary()
+        agent_loader = AgentLoader()
+
+        # 7. Orchestrator — central hub
+        return Orchestrator(
+            router=router,
+            planner=planner,
+            critic=critic,
+            worker=worker,
+            step_runner=step_runner,
+            memory=memory,
+            preferences=preferences,
+            skill_library=skill_library,
+            agent_loader=agent_loader,
+            event_bus=event_bus
+        )
+
+
+========================================
+FILE: ./core/health_check.py
+========================================
+
+"""
+Startup health checks for the Multi-Agent Automation Framework.
+Verifies that all critical dependencies are available before
+the REPL loop starts, providing human-readable error messages.
+"""
+import sys
+import shutil
+
+from core.logger import setup_logger, console
+
+logger = setup_logger("HealthCheck")
+
+
+def check_dependencies() -> bool:
+    """
+    Verifies all critical dependencies are installed and accessible.
+    Returns True if all checks pass, False otherwise.
+    """
+    all_ok = True
+
+    # --- Required Python packages ---
+    required_packages = {
+        "ollama": "pip install ollama",
+        "chromadb": "pip install chromadb",
+        "mss": "pip install mss",
+        "rich": "pip install rich",
+    }
+
+    optional_packages = {
+        "pyautogui": "pip install pyautogui  (needed for GUI automation)",
+        "pytesseract": "pip install pytesseract  (needed for OCR element finding)",
+        "cv2": "pip install opencv-python  (needed for vision UI parsing)",
+        "playwright": "pip install playwright && playwright install chromium  (needed for browser automation)",
+    }
+
+    for package, install_cmd in required_packages.items():
+        try:
+            __import__(package)
+        except ImportError:
+            logger.error(f"Missing required package '{package}'. {install_cmd}")
+            all_ok = False
+
+    for package, install_cmd in optional_packages.items():
+        try:
+            __import__(package)
+        except ImportError:
+            logger.warning(f"Optional package '{package}' not installed - {install_cmd}")
+
+    # --- System tools ---
+    if not shutil.which("tesseract"):
+        console.print(
+            "  [#ffaa00]![/#ffaa00] [#888888]Tesseract OCR not found in PATH. "
+            "OCR-based element finding will be disabled.[/#888888]"
+        )
+        console.print(
+            "    [#888888]Install: brew install tesseract[/#888888]"
+        )
+
+    # --- Ollama connectivity ---
+    try:
+        import ollama  # pylint: disable=import-outside-toplevel
+        ollama.list()
+    except ImportError:
+        pass  # Already caught above
+    except Exception:
+        console.print("  [#ffaa00]![/#ffaa00] [#888888]Ollama not running. Starting it in the background...[/#888888]")
+        import subprocess
+        import time
+        if not shutil.which("ollama"):
+            console.print("  [#ff0000]✗[/#ff0000] [bold]Ollama executable not found in PATH.[/bold]")
+            console.print("    [#888888]Please install Ollama from https://ollama.com[/#888888]")
+            return False
+        try:
+            # Start ollama serve in the background
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(3)  # Give it a moment to bind to the port
+            ollama.list()  # Try again
+            console.print("  [#00ff00]✓[/#00ff00] [#888888]Ollama started successfully.[/#888888]")
+        except Exception as e:
+            console.print(
+                "  [#ff0000]✗[/#ff0000] [bold]Cannot connect to or start Ollama.[/bold]"
+            )
+            console.print(
+                "    [#888888]Please run 'ollama serve' manually.[/#888888]"
+            )
+            all_ok = False
+
+    if all_ok:
+        logger.debug("All dependency checks passed.")
+
+    return all_ok
+
+
+========================================
+FILE: ./core/llm_client.py
+========================================
+
+"""
+LLM Client abstraction layer for the Multi-Agent Automation Framework.
+
+Provides a Protocol (interface) and a concrete Ollama implementation.
+All agents receive an LLMClient via constructor injection instead of
+importing `ollama` directly. This enables:
+  - Swapping backends (vLLM, Groq, OpenAI) by writing one new class.
+  - Unit testing with a FakeLLMClient that returns canned responses.
+  - Centralizing keep_alive, num_ctx, and retry logic in one place.
+"""
+from typing import Optional, Protocol, runtime_checkable
+
+from core.logger import setup_logger
+
+logger = setup_logger("LLMClient")
+
+
+@runtime_checkable
+class LLMClient(Protocol):
+    """
+    Abstract interface for LLM chat completion.
+    All agents depend on this Protocol, never on a concrete SDK.
+    """
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> str:
+        """
+        Send a chat completion request and return the content string.
+
+        Args:
+            model: The model identifier (e.g., "qwen3-coder:30b").
+            messages: The chat messages list.
+            format: Optional output format hint (e.g., "json").
+            images: Optional list of image paths for vision models.
+
+        Returns:
+            The raw content string from the model's response.
+        """
+        ...
+
+
+class OllamaClient:
+    """
+    Concrete LLMClient implementation wrapping the Ollama Python SDK.
+
+    Centralizes all Ollama-specific configuration:
+    - keep_alive=0 for Zero-Concurrency GPU management
+    - num_ctx for context window size
+    - Uses AsyncClient for persistent HTTP connection pooling
+    """
+
+    def __init__(self, num_ctx: int = 8192, keep_alive: int = 0) -> None:
+        self._num_ctx = num_ctx
+        self._keep_alive = keep_alive
+        
+        # Instantiate AsyncClient once to reuse the aiohttp ClientSession
+        from ollama import AsyncClient
+        self._client = AsyncClient()
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> str:
+        """Send a chat completion via the Ollama Async SDK."""
+
+        # Merge defaults with custom options if provided
+        ollama_options = {"num_ctx": self._num_ctx}
+        if options:
+            ollama_options.update(options)
+
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+            "options": ollama_options,
+            "keep_alive": self._keep_alive,
+        }
+        if format:
+            kwargs["format"] = format
+
+        logger.debug("LLM request: model=%s, msgs=%d, format=%s",
+                      model, len(messages), format)
+
+        # Await the async client natively (no threads needed!)
+        response = await self._client.chat(**kwargs)
+        content = response.get("message", {}).get("content", "").strip()
+
+        logger.debug("LLM response: %d chars", len(content))
+        return content
+
+
+class FakeLLMClient:
+    """
+    A test double that returns pre-configured responses.
+    Use in unit tests to avoid requiring a running Ollama instance.
+
+    Usage:
+        fake = FakeLLMClient(responses=['["step 1"]', '{"approved": true}'])
+        router = Router(llm=fake, model_name="test")
+    """
+
+    def __init__(self, responses: Optional[list[str]] = None) -> None:
+        self._responses = list(responses or [])
+        self._call_index = 0
+        self.call_log: list[dict] = []
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> str:
+        """Return the next canned response, cycling if exhausted."""
+        self.call_log.append({
+            "model": model,
+            "messages": messages,
+            "format": format,
+        })
+
+        if not self._responses:
+            return '{"intent": "task"}'
+
+        response = self._responses[self._call_index % len(self._responses)]
+        self._call_index += 1
+        return response
+
+
+========================================
+FILE: ./core/logger.py
+========================================
+
+"""
+Logger module for standardized output across all framework components.
+Uses rich for a clean, premium terminal look without emojis.
+"""
+import logging
+import os
+
+from rich.logging import RichHandler
+from rich.console import Console
+
+# Share a single global console for the entire app
+# Force terminal to False if in CI, otherwise auto-detect
+console = Console(force_terminal=False if os.getenv("CI") else None)
+
+def setup_logger(name: str) -> logging.Logger:
+    """Creates a configured logger with standard formatting."""
+    logger = logging.getLogger(name)
+
+    # Prevent adding handlers multiple times if instantiated multiple times
+    if logger.hasHandlers():
+        return logger
+
+    debug_str = os.getenv("DEBUG", "False").strip().lower()
+    logger.setLevel(logging.DEBUG if debug_str in ("true", "1", "t", "yes", "on") else logging.INFO)
+
+    # Rich handler for clean, colorized terminal output
+    handler = RichHandler(
+        console=console,
+        show_path=False,
+        show_time=True,
+        rich_tracebacks=True,
+        markup=True
+    )
+    formatter = logging.Formatter("%(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    # Optional: Structured JSON file logging (Phase 5/8)
+    if os.getenv("ENABLE_JSON_LOGGING", "False").lower() in ("true", "1", "t"):
+        import json
+        class JsonFormatter(logging.Formatter):
+            def format(self, record):
+                log_record = {
+                    "timestamp": self.formatTime(record, self.datefmt),
+                    "name": record.name,
+                    "level": record.levelname,
+                    "message": record.getMessage(),
+                }
+                if record.exc_info:
+                    log_record["exception"] = self.formatException(record.exc_info)
+                return json.dumps(log_record)
+
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+            
+        file_handler = logging.FileHandler(os.path.join(log_dir, "framework.jsonl"))
+        file_handler.setFormatter(JsonFormatter())
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+========================================
+FILE: ./core/models.py
+========================================
+
+"""
+Type-safe data models for the Multi-Agent Automation Framework.
+Replaces raw dict/string passing with validated dataclasses and enums.
+"""
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional, Union
+
+
+class ActionType(str, Enum):
+    """All supported action verbs in the execution pipeline."""
+    RUN_COMMAND = "run_command"
+    CLICK = "click"
+    TYPE = "type"
+    HOTKEY = "hotkey"
+    GOTO = "goto"
+    SLEEP = "sleep"
+    CLOSE_BROWSER = "close_browser"
+    OPEN_APP = "open_app"
+    CLICK_DOM = "click_dom"
+    TYPE_DOM = "type_dom"
+    SEARCH_START_MENU = "search_start_menu"
+
+
+class MethodType(str, Enum):
+    """Execution backend identifiers."""
+    CLI = "cli"
+    GUI = "gui"
+    BROWSER = "browser"
+    SYSTEM = "system"
+
+
+# Mapping from action to its canonical method
+ACTION_TO_METHOD = {
+    ActionType.RUN_COMMAND: MethodType.CLI,
+    ActionType.CLICK: MethodType.GUI,
+    ActionType.TYPE: MethodType.GUI,
+    ActionType.HOTKEY: MethodType.GUI,
+    ActionType.SEARCH_START_MENU: MethodType.GUI,
+    ActionType.GOTO: MethodType.BROWSER,
+    ActionType.CLICK_DOM: MethodType.BROWSER,
+    ActionType.TYPE_DOM: MethodType.BROWSER,
+    ActionType.SLEEP: MethodType.SYSTEM,
+    ActionType.CLOSE_BROWSER: MethodType.SYSTEM,
+    ActionType.OPEN_APP: MethodType.SYSTEM,
+}
+
+
+@dataclass
+class ActionStep:
+    """
+    A single executable step produced by the Worker agent.
+    Replaces raw Dict[str, Any] passing throughout the pipeline.
+    Supports arbitrary strings for action/method to allow for custom plugins.
+    """
+    action: Union[ActionType, str]
+    target: str
+    method: Union[MethodType, str]
+    expected_outcome: str = ""
+    undo_action: Optional[ActionType] = None
+    undo_target: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "ActionStep":
+        """
+        Construct an ActionStep from a raw dict (as parsed from Worker JSON).
+        Performs validation and auto-corrects the method field based on the action.
+        """
+        raw_action = str(raw.get("action", "unknown")).lower().strip()
+        raw_target = str(raw.get("target", ""))
+        raw_method = str(raw.get("method", "cli")).lower().strip()
+        expected = str(raw.get("expected_outcome", ""))
+
+        # Handle common LLM hallucination: action="browser", target="goto ..."
+        if raw_action == "browser" and raw_target.startswith("goto "):
+            raw_action = "goto"
+            raw_target = raw_target.replace("goto ", "", 1).strip()
+
+        # Parse action, supporting custom plugin actions
+        try:
+            action = ActionType(raw_action)
+            # Force the canonical method based on the action (override LLM mistakes)
+            method = ACTION_TO_METHOD.get(action, MethodType.CLI)
+        except ValueError:
+            # Custom plugin action
+            action = raw_action
+            method = raw_method
+
+        undo_raw_action = raw.get("undo_action")
+        undo_target = raw.get("undo_target")
+        undo_action = None
+        if undo_raw_action:
+            try:
+                undo_action = ActionType(str(undo_raw_action).lower().strip())
+            except ValueError:
+                pass
+
+        return cls(
+            action=action,
+            target=raw_target,
+            method=method,
+            expected_outcome=expected,
+            undo_action=undo_action,
+            undo_target=undo_target,
+        )
+
+    def to_dict(self) -> dict:
+        """Convert back to a plain dict for backward compatibility."""
+        res = {
+            "action": self.action.value if isinstance(self.action, Enum) else self.action,
+            "target": self.target,
+            "method": self.method.value if isinstance(self.method, Enum) else self.method,
+            "expected_outcome": self.expected_outcome,
+        }
+        if self.undo_action and self.undo_target:
+            res["undo_action"] = self.undo_action.value if isinstance(self.undo_action, Enum) else self.undo_action
+            res["undo_target"] = self.undo_target
+        return res
+
+
+@dataclass
+class StepResult:
+    """The outcome of executing a single ActionStep."""
+    success: bool
+    output: str
+    step: Optional[ActionStep] = None
+
+
+========================================
+FILE: ./core/orchestrator.py
+========================================
+
+"""
+Orchestrator module for the Local Multi-Agent Automation Framework.
+Handles routing and delegates execution to the PlanExecutionEngine.
+"""
+from collections import deque
+from typing import Optional
+
+from rich.panel import Panel
+
+from core.logger import setup_logger, console
+from core.protocols import TaskPlanner, TaskCritic, TaskWorker, IntentRouter, MemoryStore, StepRunnerProtocol
+from core.agent_loader import AgentLoader
+from memory.preferences import UserPreferences
+from memory.skill_library import SkillLibrary
+from core.plan_execution_engine import PlanExecutionEngine
+from core.custom_agent_runner import CustomAgentRunner
+
+logger = setup_logger("Orchestrator")
+
+
+class Orchestrator:
+    """
+    The central coordinator. Thin wrapper that delegates routing to the IntentRouter
+    and planning/execution to the PlanExecutionEngine.
+    """
+    def __init__(
+            self,
+            router: IntentRouter,
+            planner: TaskPlanner,
+            critic: TaskCritic,
+            worker: TaskWorker,
+            step_runner: StepRunnerProtocol,
+            memory: MemoryStore,
+            preferences: Optional[UserPreferences] = None,
+            skill_library: Optional[SkillLibrary] = None,
+            agent_loader: Optional[AgentLoader] = None,
+            event_bus=None
+            ) -> None:
+        self.router = router
+        self.planner = planner
+        self.critic = critic
+        self.worker = worker
+        self.step_runner = step_runner
+        self.memory = memory
+        self.preferences = preferences or UserPreferences()
+        self.skill_library = skill_library or SkillLibrary()
+        self.agent_loader = agent_loader
+        self.event_bus = event_bus
+
+        self._conversation_history: deque = deque(maxlen=5)
+
+        self.custom_agent_runner = CustomAgentRunner(
+            planner_llm=self.planner.llm,
+            step_runner=self.step_runner,
+            default_model_name=self.planner.model_name
+        )
+
+        self.engine = PlanExecutionEngine(
+            planner=self.planner,
+            critic=self.critic,
+            step_runner=self.step_runner,
+            memory=self.memory,
+            preferences=self.preferences,
+            skill_library=self.skill_library,
+            agent_loader=self.agent_loader,
+            custom_agent_runner=self.custom_agent_runner,
+            event_bus=self.event_bus
+        )
+
+    async def process_prompt(self, user_text: str) -> None:
+        """Main entry point for processing user input."""
+        if not getattr(self, "_prefs_loaded", False):
+            await self.preferences.load()
+            self._prefs_loaded = True
+            
+        logger.info("Processing user input: '%s'", user_text)
+
+        # 1. Fast paths: Memory Cache
+        cached_plan = self.memory.get_plan(user_text)
+        if cached_plan:
+            logger.info("[bold green]Found successful plan in memory! Bypassing planner...[/bold green]")
+            await self.engine.execute_cached_plan(user_text, cached_plan, self._conversation_history)
+            return
+
+        # 1.5. Fast paths: Skill Library
+        if self.skill_library:
+            skill_plan = self.skill_library.get_skill_plan(user_text)
+            if skill_plan:
+                logger.info("[bold green]Found matching skill in library! Bypassing planner...[/bold green]")
+                await self.engine.execute_cached_plan(user_text, skill_plan, self._conversation_history)
+                return
+
+        # 2. Routing
+        logger.info("Routing intent...")
+        try:
+            intent, response = await self.router.classify(user_text)
+        except Exception as e:
+            logger.error("Routing failed: %s", e)
+            return
+
+        if intent == "question":
+            console.print(Panel(response, title="Agent Answer", border_style="blue"))
+            self._conversation_history.append({"prompt": user_text, "outcome": "Answered as a standard question."})
+            return
+
+        if intent == "visual_question":
+            logger.info("Delegating visual question to Vision Verifier...")
+            answer = await self.step_runner.verifier.ask(user_text)
+            console.print(Panel(answer, title="Vision Agent Answer", border_style="green"))
+            self._conversation_history.append({"prompt": user_text, "outcome": "Answered as a visual question."})
+            return
+
+        logger.info("[bold cyan]Identified as a TASK. Planning execution...[/bold cyan]")
+
+        # 2.5 Custom Agent early exit
+        if self.agent_loader:
+            matched_agent = self.agent_loader.match(user_text)
+            if matched_agent:
+                logger.info("[bold magenta]Delegating to custom agent: '%s'[/bold magenta]", matched_agent.name)
+                success = await self.custom_agent_runner.run_custom_agent(user_text, matched_agent)
+                if success:
+                    self._conversation_history.append({"prompt": user_text, "outcome": f"Completed by {matched_agent.name}."})
+                else:
+                    self._conversation_history.append({"prompt": user_text, "outcome": f"Failed (agent: {matched_agent.name})."})
+                    logger.info("Falling back to default planning pipeline...")
+                    await self.engine.plan_and_execute(user_text, self._conversation_history)
+                return
+
+        # 3. Execution
+        await self.engine.plan_and_execute(user_text, self._conversation_history)
+
+
+========================================
+FILE: ./core/plan_execution_engine.py
+========================================
+
+import json
+import time
+import asyncio
+from datetime import datetime
+from typing import Tuple, Optional
+
+from rich.panel import Panel
+
+from core.config import config
+from core.logger import setup_logger, console
+from core.protocols import TaskPlanner, TaskCritic, StepRunnerProtocol, MemoryStore
+from core.events import TaskStartedEvent, TaskCompletedEvent
+from core.agent_loader import AgentLoader
+from memory.preferences import UserPreferences
+from memory.skill_library import SkillLibrary
+from core.planning_context import PlanningContext
+from core.custom_agent_runner import CustomAgentRunner
+
+logger = setup_logger("PlanExecutionEngine")
+
+def _group_steps_for_parallel(steps: list[dict]) -> list[list[dict]]:
+    """Groups steps into sub-lists that can be run concurrently."""
+    groups = []
+    current_group = []
+    for s in steps:
+        if s.get("parallel"):
+            current_group.append(s)
+        else:
+            if current_group:
+                groups.append(current_group)
+                current_group = []
+            groups.append([s])
+    if current_group:
+        groups.append(current_group)
+    return groups
+
+class PlanExecutionEngine:
+    """Handles the core loop of planning, executing, and evaluating tasks."""
+    def __init__(
+        self,
+        planner: TaskPlanner,
+        critic: TaskCritic,
+        step_runner: StepRunnerProtocol,
+        memory: MemoryStore,
+        preferences: Optional[UserPreferences] = None,
+        skill_library: Optional[SkillLibrary] = None,
+        agent_loader: Optional[AgentLoader] = None,
+        custom_agent_runner: Optional[CustomAgentRunner] = None,
+        event_bus=None
+    ) -> None:
+        self.planner = planner
+        self.critic = critic
+        self.step_runner = step_runner
+        self.memory = memory
+        self.preferences = preferences
+        self.skill_library = skill_library
+        self.agent_loader = agent_loader
+        self.custom_agent_runner = custom_agent_runner
+        self.event_bus = event_bus
+
+    async def execute_cached_plan(self, user_text: str, plan_json: str, history: list) -> bool:
+        """Fast-path execution for pre-verified plans."""
+        self.event_bus.publish("task_started", TaskStartedEvent(
+            task_description=user_text,
+            message=f"Starting cached task: {user_text}"
+        ))
+        
+        task_start_time = time.time()
+        try:
+            steps = json.loads(plan_json)
+            if not isinstance(steps, list):
+                logger.error("Invalid plan format.")
+                return False
+
+            groups = _group_steps_for_parallel(steps)
+            plan_success, _, all_steps_executed = await self.execute_step_groups(groups)
+
+            if plan_success:
+                episode = {
+                    "task": user_text,
+                    "plan": steps,
+                    "steps_executed": all_steps_executed,
+                    "outcome": "success",
+                    "total_duration_s": round(time.time() - task_start_time, 2),
+                    "timestamp": datetime.now().isoformat()
+                }
+                self.memory.save_episode(episode)
+                history.append({"prompt": user_text, "outcome": "Task completed successfully (cached)."})
+                self.event_bus.publish("task_completed", TaskCompletedEvent(
+                    task_description=user_text,
+                    success=True,
+                    total_duration_s=round(time.time() - task_start_time, 2),
+                    message="Cached task completed successfully."
+                ))
+            else:
+                self.event_bus.publish("task_completed", TaskCompletedEvent(
+                    task_description=user_text,
+                    success=False,
+                    total_duration_s=round(time.time() - task_start_time, 2),
+                    message="Cached task failed."
+                ))
+            return plan_success
+        except Exception as e:
+            logger.error("Error executing cached plan: %s", e)
+            return False
+
+    async def execute_step_groups(self, groups: list[list[dict]]) -> Tuple[bool, str, list]:
+        """Executes groups of steps, supporting delegation and concurrency."""
+        plan_success = True
+        failure_feedback = ""
+        all_steps_executed = []
+
+        for group in groups:
+            delegated_steps = [s for s in group if s.get("delegate_to")]
+            normal_tasks = [s["task"] for s in group if not s.get("delegate_to")]
+
+            if delegated_steps and self.custom_agent_runner and self.agent_loader:
+                logger.info("[bold magenta]Delegating %d tasks to custom agents...[/bold magenta]", len(delegated_steps))
+                
+                async def _delegate(step):
+                    agent_name = step["delegate_to"]
+                    agent = self.agent_loader.agents.get(agent_name)
+                    if agent:
+                        await self.custom_agent_runner.run_custom_agent(step["task"], agent)
+                    else:
+                        logger.warning("Delegated agent '%s' not found.", agent_name)
+                        await self.step_runner.run([step["task"]])
+                        
+                await asyncio.gather(*(_delegate(s) for s in delegated_steps))
+
+            if normal_tasks:
+                if len(normal_tasks) == 1:
+                    plan_success, failure_feedback, steps_exec = await self.step_runner.run(normal_tasks)
+                    all_steps_executed.extend(steps_exec)
+                    if not plan_success:
+                        break
+                else:
+                    logger.info("[bold cyan]Executing %d tasks in parallel...[/bold cyan]", len(normal_tasks))
+                    results = await asyncio.gather(*(self.step_runner.run([task]) for task in normal_tasks))
+                    for success, feedback, steps_exec in results:
+                        all_steps_executed.extend(steps_exec)
+                        if not success:
+                            plan_success = False
+                            failure_feedback = feedback
+                            break
+                    if not plan_success:
+                        break
+
+        return plan_success, failure_feedback, all_steps_executed
+
+    async def plan_and_execute(self, user_text: str, history: list) -> bool:
+        """The main loop: generate plan, evaluate with critic, and execute."""
+        self.event_bus.publish("task_started", TaskStartedEvent(
+            task_description=user_text,
+            message=f"Starting task: {user_text}"
+        ))
+        
+        task_start_time = time.time()
+        
+        ctx = PlanningContext(
+            original_task=user_text,
+            max_prompt_chars=config.max_prompt_chars,
+            llm=self.planner.llm,
+            model_name=self.planner.model_name
+        )
+        
+        if self.preferences:
+            ctx.user_preferences = self.preferences.get_context_string()
+            
+        if self.agent_loader:
+            ctx.available_agents = self.agent_loader.get_agent_summary()
+            
+        ctx.conversation_history = list(history)
+        ctx.past_failures = self.memory.get_failures(user_text)
+        
+        if ctx.past_failures:
+            logger.warning("[yellow]Loaded %s past failure(s) into Planner context.[/yellow]", len(ctx.past_failures))
+
+        for plan_attempt in range(config.max_plan_regenerations):
+            if plan_attempt > 0:
+                logger.info("[magenta]Requesting new plan (Attempt %s/%s)...[/magenta]", plan_attempt + 1, config.max_plan_regenerations)
+            else:
+                logger.info("Generating step-by-step plan...")
+
+            try:
+                plan_json = await self.planner.generate_plan(await ctx.build_prompt())
+                steps = json.loads(plan_json)
+                if not isinstance(steps, list) or not all(isinstance(s, dict) and "task" in s for s in steps):
+                    raise ValueError("Generated plan is not a JSON array of objects with 'task' keys.")
+
+                plan_text = ""
+                for idx, step in enumerate(steps):
+                    para = " (Parallel)" if step.get("parallel") else ""
+                    plan_text += f"[bold]{idx + 1}.[/bold] [cyan]Goal[/cyan] -> {step['task']}{para}\n"
+                console.print(Panel(plan_text.strip(), title=f"Execution Plan ({len(steps)} steps)", border_style="magenta"))
+
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error("Error parsing plan: %s", e)
+                ctx.add_feedback(f"\n\n[SYSTEM FEEDBACK]: Previous response was not valid JSON. Error: {e}.\nCRITICAL INSTRUCTION: You MUST output ONLY a valid JSON array.")
+                continue
+            except Exception as e:
+                logger.error("Planner exception: %s", e)
+                ctx.add_feedback(f"\n\n[SYSTEM FEEDBACK]: Generation failed: {e}.\nCRITICAL INSTRUCTION: Fix the error and generate a valid plan.")
+                continue
+
+            logger.info("Passing plan to Critic for evaluation...")
+            is_approved, critic_feedback = await self.critic.verify_plan(user_text, plan_json)
+
+            if not is_approved:
+                logger.warning("[red]Critic rejected the plan:[/red] %s. Regenerating...", critic_feedback)
+                ctx.add_feedback(f"\n\n[SYSTEM FEEDBACK]: Critic rejected plan. Reason: {critic_feedback}\nCRITICAL INSTRUCTION: You MUST fix these issues and generate a new plan.")
+                continue
+
+            logger.info("[green]Critic approved the plan.[/green]")
+
+            groups = _group_steps_for_parallel(steps)
+            plan_success, failure_feedback, all_steps_executed = await self.execute_step_groups(groups)
+
+            if plan_success:
+                logger.info("[bold green]Task Complete.[/bold green]")
+                self.memory.save_plan(user_text, plan_json)
+                
+                episode = {
+                    "task": user_text,
+                    "plan": steps,
+                    "steps_executed": all_steps_executed,
+                    "outcome": "success",
+                    "total_duration_s": round(time.time() - task_start_time, 2),
+                    "timestamp": datetime.now().isoformat()
+                }
+                self.memory.save_episode(episode)
+                
+                if self.preferences:
+                    for s in all_steps_executed:
+                        if s.get("action") == "open_app":
+                            await self.preferences.log_app_usage(s.get("target"))
+
+                if self.skill_library:
+                    self.skill_library.save_skill(user_text, plan_json)
+
+                history.append({"prompt": user_text, "outcome": "Task completed successfully."})
+                self.event_bus.publish("task_completed", TaskCompletedEvent(
+                    task_description=user_text,
+                    success=True,
+                    total_duration_s=round(time.time() - task_start_time, 2),
+                    message="Task completed successfully."
+                ))
+                return True
+
+            if failure_feedback:
+                logger.warning("Plan failed. Passing feedback to planner for a new strategy...")
+                self.memory.save_failure(user_text, plan_json, failure_feedback.strip())
+                if self.skill_library:
+                    self.skill_library.mark_failure(user_text)
+                ctx.add_feedback(failure_feedback)
+                continue
+
+            self.memory.save_failure(user_text, plan_json, "User aborted or catastrophic error")
+            self.event_bus.publish("task_completed", TaskCompletedEvent(
+                task_description=user_text,
+                success=False,
+                total_duration_s=round(time.time() - task_start_time, 2),
+                message="Task aborted or catastrophic error."
+            ))
+            return False
+
+        logger.error("[bold red]Task failed completely after maximum plan regenerations. Rolling back...[/bold red]")
+        await self.step_runner.rollback()
+        history.append({"prompt": user_text, "outcome": "Task failed after max retries."})
+        self.event_bus.publish("task_completed", TaskCompletedEvent(
+            task_description=user_text,
+            success=False,
+            total_duration_s=round(time.time() - task_start_time, 2),
+            message="Task failed after maximum retries."
+        ))
+        return False
+
+
+========================================
+FILE: ./core/planner.py
+========================================
+
+"""
+Planner module for breaking down user tasks into actionable JSON steps.
+"""
+from core.config import config
+from core.logger import setup_logger
+from core.response_parser import ResponseParser
+from core.config import config
+from core.logger import setup_logger
+from core.response_parser import ResponseParser
+from core.protocols import TaskPlanner
+from core.events import SystemEvent, EventBus
+from core.prompt_loader import PromptLoader
+from core.base_agent import BaseAgent
+import json
+
+logger = setup_logger("Planner")
+
+
+class Planner(BaseAgent):
+    """
+    Agent that generates a sequential plan of actions for the framework to execute.
+    """
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus = None) -> None:
+        super().__init__(llm, model_name, prompt_loader)
+        self.event_bus = event_bus
+
+    async def __call__(self, task_description: str) -> str:
+        return await self.generate_plan(task_description)
+
+    async def generate_plan(self, task_description: str) -> str:
+        """
+        Takes a task and outputs a strict JSON array of high-level sub-tasks.
+        """
+        system_prompt = self._load_prompt("planner", os_context=config.os_context)
+
+        logger.debug("Generating plan using model %s...", self.model_name)
+        if self.event_bus:
+            self.event_bus.publish("agent_action", SystemEvent(
+                source="Planner", level="INFO", message="Generating step-by-step plan..."
+            ))
+        try:
+            content = await self.llm.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task_description}
+                ],
+            )
+
+            # Use centralized response parser
+            return ResponseParser.clean_and_extract_json(content, shape="array")
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.error("Planner failed to generate plan due to parsing/validation error: %s", e)
+            raise e
+
+
+========================================
+FILE: ./core/planning_context.py
+========================================
+
+"""
+PlanningContext — structured prompt builder for the planning loop.
+
+Replaces the brittle `current_prompt_context += ...` pattern in the
+Orchestrator with a type-safe dataclass that:
+  - Keeps all context components separate and inspectable.
+  - Enforces a token budget so the prompt never silently overflows
+    the LLM's context window.
+  - Summarizes oldest feedback when reaching 80% capacity.
+  - Truncates oldest feedback first (FIFO) to stay within budget as a fallback.
+"""
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class PlanningContext:
+    """Accumulates context for the Planner across retry iterations."""
+
+    original_task: str
+    user_preferences: str = ""
+    os_context: str = ""
+    conversation_history: list[dict] = field(default_factory=list)
+    available_agents: str = ""
+    past_failures: list[dict] = field(default_factory=list)
+    system_feedback: list[str] = field(default_factory=list)
+
+    # Approximate character budget (not tokens — we use ~4 chars/token heuristic).
+    # Default 24 000 chars ≈ 6 000 tokens, leaving headroom in an 8 192-token window.
+    max_prompt_chars: int = 24_000
+
+    llm: Any = None
+    model_name: str = ""
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def add_feedback(self, feedback: str) -> None:
+        """Append system feedback from a failed plan attempt."""
+        self.system_feedback.append(feedback)
+
+    async def build_prompt(self) -> str:
+        """Render all context into a single prompt string for the Planner.
+        """
+        # Trigger summarization if we are nearing the budget
+        current_est = len(self.original_task) + len(str(self.past_failures)) + len(str(self.conversation_history))
+        for fb in self.system_feedback:
+            current_est += len(fb)
+            
+        if current_est > (self.max_prompt_chars * 0.8) and self.llm and self.model_name:
+            await self._summarize()
+
+        sections: list[str] = [self.original_task]
+
+        if self.user_preferences:
+            sections.append(
+                f"\n\n[USER PREFERENCES]: {self.user_preferences}"
+            )
+
+        if self.available_agents:
+            sections.append(
+                f"\n\n[AVAILABLE AGENTS]: {self.available_agents}"
+            )
+
+        if self.conversation_history:
+            history_block = "\n\n[CONVERSATION HISTORY] (most recent last):\n"
+            for entry in self.conversation_history:
+                history_block += (
+                    f"- User said: \"{entry['prompt']}\" → "
+                    f"Outcome: {entry['outcome']}\n"
+                )
+            sections.append(history_block)
+
+        if self.past_failures:
+            failure_block = (
+                "\n\n[REFLECTION MEMORY] Warning: The following strategies "
+                "failed previously for this or a similar task. "
+                "DO NOT REPEAT THEM.\n"
+            )
+            for failure in self.past_failures:
+                failure_block += (
+                    f"- Failed Plan: {failure['plan']}\n"
+                    f"  Reason: {failure['reason']}\n"
+                )
+            sections.append(failure_block)
+
+        # Feedback is appended last so it's trimmed first below.
+        for fb in self.system_feedback:
+            sections.append(fb)
+
+        return self._fit_to_budget_sync(sections)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    async def _summarize(self):
+        """Summarizes history and failures into a dense block."""
+        from core.logger import setup_logger
+        logger = setup_logger("PlanningContext")
+        
+        prompt = "Summarize the following past failures and conversation history into dense, concise bullet points highlighting key lessons learned to avoid repeating mistakes. Be extremely brief.\n\n"
+        if self.past_failures:
+            prompt += "PAST FAILURES:\n" + str(self.past_failures) + "\n\n"
+        if self.conversation_history:
+            prompt += "CONVERSATION HISTORY:\n" + str(self.conversation_history) + "\n\n"
+        
+        try:
+            logger.info("Context window nearing 80%. Summarizing history...")
+            summary = await self.llm.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            self.past_failures = [{"plan": "Summarized Context", "reason": summary}]
+            self.conversation_history = []
+            logger.info("[cyan]Context summarized successfully to save tokens.[/cyan]")
+        except Exception as e:
+            logger.error(f"Context summarization failed: {e}")
+
+    def _fit_to_budget_sync(self, sections: list[str]) -> str:
+        """Drop the *oldest* trailing sections until under budget."""
+        prompt = "".join(sections)
+        if len(prompt) <= self.max_prompt_chars:
+            return prompt
+
+        # Drop feedback entries (last elements) one-by-one, oldest first.
+        # The first section (original_task) is never dropped.
+        while len(sections) > 1 and len("".join(sections)) > self.max_prompt_chars:
+            sections.pop()
+
+        return "".join(sections)
+
+
+========================================
+FILE: ./core/prompt_loader.py
+========================================
+
+import os
+import string
+from typing import Optional
+
+import yaml
+
+from core.logger import setup_logger
+
+logger = setup_logger("PromptLoader")
+
+_PROMPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
+)
+
+
+class PromptLoader:
+    """Loads and caches prompt templates from YAML files in the prompts/ directory."""
+
+    def __init__(self, prompts_dir: str = _PROMPTS_DIR) -> None:
+        self._dir = prompts_dir
+        self._cache: dict[str, dict] = {}
+
+    def _load_file(self, agent_name: str) -> dict:
+        if agent_name in self._cache:
+            return self._cache[agent_name]
+        path = os.path.join(self._dir, f"{agent_name}.yaml")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        self._cache[agent_name] = data
+        return data
+
+    def load(self, agent_name: str, key: str = "system_prompt", **kwargs) -> str:
+        """Load a prompt template and render it with the given variables.
+        
+        Args:
+            agent_name: The name of the agent (e.g., 'planner', 'worker').
+            key: The YAML key to load (default: 'system_prompt').
+            **kwargs: Template variables to substitute (e.g., os_context='...').
+        
+        Returns:
+            The rendered prompt string.
+        """
+        data = self._load_file(agent_name)
+        template = data.get(key, "")
+        if not template:
+            raise ValueError(f"Key '{key}' not found in {agent_name}.yaml")
+        # Use jinja2.Template for advanced rendering
+        import jinja2
+        try:
+            return jinja2.Template(template).render(**kwargs)
+        except Exception as e:
+            logger.warning("Failed to render Jinja2 template for %s/%s: %s", agent_name, key, e)
+            return template
+
+    def reload(self) -> None:
+        """Clear the cache to force reloading from disk."""
+        self._cache.clear()
+
+
+========================================
+FILE: ./core/protocols.py
+========================================
+
+"""
+Protocols (Interfaces) for the Multi-Agent Automation Framework.
+
+This module enforces SOLID principles by ensuring the Orchestrator
+and other top-level components depend on abstractions, not concretions.
+"""
+from typing import Protocol, Optional, Any, Dict, List
+from typing import runtime_checkable
+
+
+@runtime_checkable
+class Agent(Protocol):
+    """Base interface for any agent in the system."""
+    model_name: str
+
+
+@runtime_checkable
+class TaskPlanner(Agent, Protocol):
+    """Interface for agents that generate JSON plans from natural language."""
+    async def generate_plan(self, task_description: str) -> str:
+        ...
+
+
+@runtime_checkable
+class TaskWorker(Agent, Protocol):
+    """Interface for agents that break down high-level tasks into executable steps."""
+    async def generate_action(self, sub_task: str, current_context: str) -> str:
+        ...
+
+
+@runtime_checkable
+class TaskCritic(Agent, Protocol):
+    """Interface for agents that evaluate plans for safety and correctness."""
+    async def verify_plan(self, plan_json: str, user_task: str) -> tuple[bool, str]:
+        ...
+
+
+@runtime_checkable
+class IntentRouter(Agent, Protocol):
+    """Interface for agents that classify the user's intent."""
+    async def classify(self, user_text: str) -> tuple[str, Optional[str]]:
+        ...
+
+
+@runtime_checkable
+class MemoryStore(Protocol):
+    """Interface for episodic and semantic memory storage."""
+    def get_plan(self, task_description: str) -> Optional[str]:
+        ...
+
+    def save_plan(self, task_description: str, plan_json: str) -> None:
+        ...
+
+    def get_failures(self, task_description: str) -> list:
+        ...
+
+    def save_failure(self, task_description: str, failed_plan: str, reason: str) -> None:
+        ...
+        
+    def save_episode(self, episode_data: dict) -> None:
+        ...
+        
+    def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
+        ...
+        
+    def close(self) -> None:
+        """Gracefully release resources (e.g. database locks)."""
+        ...
+
+
+@runtime_checkable
+class StepRunnerProtocol(Protocol):
+    """Interface for the engine that executes the physical steps."""
+    async def run(self, plan: List[Dict[str, Any]]) -> tuple[bool, str, List[Dict[str, Any]]]:
+        ...
+
+
+========================================
+FILE: ./core/response_parser.py
+========================================
+
+"""
+Response parser utility for cleaning and extracting structured JSON
+from LLM outputs. Centralizes all the defensive parsing logic that
+was previously duplicated across Planner and Worker.
+"""
+import json
+import re
+from typing import Union
+
+from core.logger import setup_logger
+
+logger = setup_logger("ResponseParser")
+
+
+class ResponseParser:
+    """
+    Cleans raw LLM output and extracts valid JSON.
+    Handles common LLM quirks: <think> blocks, markdown fences,
+    trailing commas, and embedded prose around JSON.
+    """
+
+    @staticmethod
+    def clean_and_extract_json(
+            raw: str, shape: str = "array") -> str:
+        """
+        Takes raw LLM output and returns a clean JSON string.
+
+        Args:
+            raw: The raw string from the LLM response.
+            shape: "array" to extract [...], "object" to extract {...}.
+
+        Returns:
+            A validated JSON string.
+
+        Raises:
+            ValueError: If no valid JSON can be extracted.
+        """
+        content = raw.strip()
+
+        # 1. Strip <think>...</think> blocks (reasoning models like DeepSeek-R1, Qwen3)
+        content = re.sub(
+            r'<think>.*?</think>', '', content, flags=re.DOTALL
+        ).strip()
+
+        # 2. Strip markdown code fences (```json ... ```)
+        content = re.sub(
+            r'```(?:json)?\s*\n?', '', content
+        ).strip()
+
+        # 3. Extract the target JSON shape using reliable find/rfind
+        if shape == "array":
+            start_idx = content.find('[')
+            end_idx = content.rfind(']')
+            if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+                content = content[start_idx:end_idx+1]
+        elif shape == "object":
+            start_idx = content.find('{')
+            end_idx = content.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+                content = content[start_idx:end_idx+1]
+        else:
+            raise ValueError(f"Unknown shape: {shape}. Use 'array' or 'object'.")
+
+        # 4. Remove trailing commas (common LLM hallucination)
+        content = re.sub(r',\s*([\]}])', r'\1', content)
+
+        # 5. Validate that it's actually parseable JSON
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.error(
+                "Failed to extract valid JSON (shape=%s): %s\nRaw content: %s",
+                shape, e, raw[:500]
+            )
+            raise ValueError(
+                f"Could not extract valid JSON ({shape}): {e}"
+            ) from e
+
+        return content.strip()
+
+    @staticmethod
+    def parse_worker_output(raw_json: str) -> list:
+        """
+        Parses Worker JSON output into a list of action step dicts.
+        Handles the common case where the Worker returns a single
+        dict instead of a list.
+        """
+        data = json.loads(raw_json)
+
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Expected list or dict from Worker, got {type(data).__name__}"
+            )
+
+        return data
+
+
+========================================
+FILE: ./core/router.py
+========================================
+
+"""
+Router module for evaluating the intent of a user prompt.
+Determines whether the user is asking a question or issuing a task command.
+"""
+import json
+from typing import Optional, Tuple
+
+from core.logger import setup_logger
+from core.config import config
+from core.prompt_loader import PromptLoader
+from core.base_agent import BaseAgent
+
+logger = setup_logger("Router")
+
+
+class Router(BaseAgent):  # pylint: disable=too-few-public-methods
+    """
+    Agent that routes user requests to either the QA LLM or the Planner.
+    """
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus=None) -> None:
+        super().__init__(llm, model_name, prompt_loader)
+        self.event_bus = event_bus
+
+    async def __call__(self, user_text: str) -> Tuple[str, Optional[str]]:
+        return await self.classify(user_text)
+
+    async def classify(self, user_text: str) -> Tuple[str, Optional[str]]:
+        """
+        Classifies user text as either 'question' or 'task' using structured JSON.
+        Returns a tuple: (intent, answer_if_question)
+        """
+        # Deterministic Heuristic Bypass
+        action_verbs = [
+            'open', 'run', 'start', 'click', 'type', 'search', 'delete',
+            'create', 'make', 'do', 'close', 'kill'
+        ]
+        first_word = user_text.strip().split()[0].lower() if user_text.strip() else ""
+        if first_word in action_verbs:
+            logger.debug("Deterministic heuristic bypass matched verb: %s", first_word)
+            return "task", None
+
+        system_prompt = self._load_prompt("router", key="routing_prompt")
+
+        try:
+            logger.debug("Routing intent via LLM using model %s...", self.model_name)
+            content = await self.llm.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text}
+                ],
+                format='json',
+            )
+
+            try:
+                result = json.loads(content)
+                intent = result.get('intent', '').lower()
+            except json.JSONDecodeError:
+                # Ultimate fallback
+                intent = content.lower()
+
+            # If the model explicitly says task, we treat it as a task.
+            if "task" in intent:
+                return "task", None
+                
+            if "visual_question" in intent:
+                return "visual_question", None
+
+            # Otherwise, default to question/chat behavior
+            logger.debug("Intent classified as standard question. Generating answer...")
+            
+            chat_system_prompt = self._load_prompt("router", key="chat_prompt")
+            
+            answer = await self.llm.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": chat_system_prompt},
+                    {"role": "user", "content": user_text}
+                ],
+            )
+            return "question", answer
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.error("Router failed to classify intent: %s", e)
+            raise RuntimeError(f"Router error: {e}") from e
+
+
+========================================
+FILE: ./core/safety_gate.py
+========================================
+
+"""
+SafetyGate module for the Multi-Agent Automation Framework.
+Encapsulates all dangerous-command detection and user approval logic.
+"""
+import asyncio
+import shlex
+from typing import Set
+
+from core.logger import setup_logger
+
+logger = setup_logger("SafetyGate")
+
+class SafetyGate:
+    """
+    Strict Whitelist-based Safety Gate.
+    Denies all commands by default unless explicitly whitelisted.
+    """
+
+    def __init__(self, llm=None, model_name: str = "", prompt_loader=None):
+        self.llm = llm
+        self.model_name = model_name
+        self.prompt_loader = prompt_loader
+        # Only these exact base binaries are allowed to run autonomously.
+        # Keep this list highly restricted to read-only or harmless actions.
+        self.allowed_base_commands: Set[str] = {
+            "ls", "echo", "pwd", "whoami", "date", "cat", "git status",
+            "dir", "systeminfo" # Added a few Windows equivalents 
+        }
+
+    def is_safe(self, command: str) -> bool:
+        """
+        Parses the command and checks if the base binary is whitelisted.
+        """
+        if not command or not command.strip():
+            return False
+
+        try:
+            # shlex safely splits the command exactly like a Unix shell
+            parts = shlex.split(command)
+            if not parts:
+                return False
+            
+            base_binary = parts[0].lower()
+            
+            # Identify chained commands or file redirections.
+            # If the agent tries to pipe output or chain commands, force a manual review.
+            unsafe_operators = ['&', '|', ';', '>', '<']
+            if any(operator in command for operator in unsafe_operators):
+                logger.debug("Command chaining detected. Forcing manual review.")
+                return False
+
+            return base_binary in self.allowed_base_commands
+
+        except ValueError:
+            # If shlex fails to parse it (e.g., due to unmatched quotes or malformed syntax),
+            # default to denying the command.
+            return False
+
+    async def request_approval(self, command: str) -> bool:
+        """
+        Uses LLM intent scanner first. If not SAFE, prompts the user.
+        Uses asyncio.to_thread to avoid blocking the main event loop.
+        """
+        logger.info(f"Scanning command with Intelligent Security Gate: {command}")
+        if self.llm and self.prompt_loader:
+            try:
+                system_prompt = self.prompt_loader.load_prompt("safety", key="safety_prompt")
+                content = await self.llm.chat(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Command: {command}"}
+                    ],
+                    format='json'
+                )
+                import json
+                result = json.loads(content)
+                if result.get("intent") == "SAFE":
+                    logger.info(f"[bold green]LLM Security Gate Approved:[/bold green] {result.get('reason')}")
+                    return True
+                else:
+                    logger.warning(f"[bold yellow]LLM Security Gate Denied/Warned:[/bold yellow] {result.get('reason')}")
+            except Exception as e:
+                logger.error(f"Intelligent Security Gate failed: {e}. Falling back to manual approval.")
+
+        logger.warning(
+            f"\n[bold red]⚠️ UNVERIFIED COMMAND INTERCEPTED[/bold red]\n"
+            f"The agent is attempting to execute:\n"
+            f"[bold cyan]{command}[/bold cyan]"
+        )
+        try:
+            # Offload the blocking input() call to a separate thread
+            ans = await asyncio.to_thread(
+                input, "Allow execution? [y/N]: "
+            )
+            return ans.strip().lower() == 'y'
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("Approval request interrupted. Denying command.")
+            return False
+
+
+========================================
+FILE: ./core/step_runner.py
+========================================
+
+"""
+StepRunner module for the Multi-Agent Automation Framework.
+Extracts the step execution, retry, and vision verification loop
+from the Orchestrator into a focused, testable class.
+"""
+import asyncio
+import json
+from collections import deque
+from typing import Tuple
+
+from core.config import config
+from core.logger import setup_logger
+from core.models import ActionStep
+from core.response_parser import ResponseParser
+from core.safety_gate import SafetyGate
+from core.events import StepExecutedEvent, EventBus
+
+logger = setup_logger("StepRunner")
+
+# Maximum characters to keep in the action history sliding window
+_MAX_HISTORY_CHARS = 1500
+
+
+class StepRunner:
+    """
+    Executes a list of high-level sub-tasks by delegating to the Worker
+    and Executor, with retry logic, vision verification, and safety gates.
+    """
+
+    def __init__(
+        self,
+        worker,
+        executor,
+        verifier,
+        safety_gate: SafetyGate | None = None,
+        event_bus: EventBus | None = None,
+    ) -> None:
+        self.worker = worker
+        self.executor = executor
+        self.verifier = verifier
+        self.safety_gate = safety_gate or SafetyGate()
+        self.event_bus = event_bus
+        self.undo_stack: list[ActionStep] = []
+
+    async def run(self, steps: list[str]) -> Tuple[bool, str, list[dict]]:
+        """
+        Executes a list of high-level sub-tasks via the Worker Agent.
+        Returns (success: bool, failure_feedback: str, steps_executed: list[dict]).
+        """
+        # Use a deque as a sliding window to prevent context blowout
+        action_history: deque = deque(maxlen=20)
+        history_chars = 0
+        steps_executed = []
+
+        for i, sub_task in enumerate(steps):
+            logger.info(
+                "Manager delegating sub-task %s to Worker: '%s'",
+                i + 1, sub_task
+            )
+
+            # Build the history string from the sliding window
+            history_str = "\n".join(action_history)
+
+            try:
+                worker_json = await self.worker.generate_action(
+                    sub_task, history_str
+                )
+                worker_steps = ResponseParser.parse_worker_output(worker_json)
+            except (ValueError, KeyError) as e:
+                import json
+                logger.error("Worker failed to break down task: %s", e)
+                return False, (
+                    f"Worker Agent failed to generate actions for "
+                    f"sub-task '{sub_task}': {e}"
+                ), steps_executed
+
+            for j, raw_step in enumerate(worker_steps):
+                step = ActionStep.from_dict(raw_step)
+
+                step_success, feedback, duration_ms = await self._execute_single_step(
+                    step, i, j, action_history
+                )
+                
+                steps_executed.append({
+                    "action": step.action.value,
+                    "target": step.target,
+                    "success": step_success,
+                    "duration_ms": duration_ms
+                })
+
+                if not step_success:
+                    if feedback:
+                        return False, feedback, steps_executed
+                    return False, "", steps_executed
+
+        return True, "", steps_executed
+
+    async def _execute_single_step(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        action_history: deque,
+    ) -> Tuple[bool, str, int]:
+        """
+        Executes a single ActionStep with retries and vision verification.
+        Returns (success: bool, failure_feedback: str, duration_ms: int).
+        """
+        import time
+        for attempt in range(config.max_step_retries + 1):
+            if attempt > 0:
+                logger.info(
+                    "Retrying Worker Step %s.%s (Attempt %s/%s)...",
+                    task_idx + 1, step_idx + 1,
+                    attempt + 1, config.max_step_retries + 1
+                )
+            else:
+                logger.info(
+                    "Worker Step %s.%s: [cyan]%s[/cyan] %s (Method: %s)",
+                    task_idx + 1, step_idx + 1,
+                    step.action.value, step.target, step.method.value
+                )
+
+            # Safety gate for dangerous CLI commands
+            if step.method.value == "cli" and not self.safety_gate.is_safe(step.target):
+                approved = await self.safety_gate.request_approval(step.target)
+                if not approved:
+                    logger.warning("Action canceled by user. Aborting task.")
+                    return False, "", 0
+
+            start_time = time.time()
+            # Execute the step
+            success, output = await self.executor.execute_step(step.to_dict())
+
+            # Record in sliding-window history
+            entry = (
+                f"Action: {step.action.value} | Target: {step.target} | "
+                f"Method: {step.method.value} | Success: {success} | "
+                f"Output: {output[:200]}"
+            )
+            action_history.append(entry)
+
+            if success:
+                logger.info(
+                    "[green]Worker Step %s.%s completed:[/green] %s",
+                    task_idx + 1, step_idx + 1, output
+                )
+
+                # Vision verification if applicable
+                _skip = {"", "unknown", "none", "n/a"}
+                if step.expected_outcome and step.expected_outcome.strip().lower() not in _skip:
+                    v_ok, v_feedback = await self._verify_with_vision(
+                        step, task_idx, step_idx, attempt
+                    )
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    if v_ok:
+                        if step.undo_action and step.undo_target:
+                            self.undo_stack.append(step)
+                        if self.event_bus:
+                            self.event_bus.publish("step_executed", StepExecutedEvent(
+                                step_action=step.action.value,
+                                step_target=step.target,
+                                success=True,
+                                message=f"Step succeeded (vision ok): {output}"
+                            ))
+                        return True, "", duration_ms
+                    if v_feedback:
+                        if self.event_bus:
+                            self.event_bus.publish("step_executed", StepExecutedEvent(
+                                step_action=step.action.value,
+                                step_target=step.target,
+                                success=False,
+                                message=f"Step failed vision: {v_feedback}"
+                            ))
+                        return False, v_feedback, duration_ms
+                    # v_feedback is empty means retry
+                    continue
+
+                # No expected outcome, step succeeds automatically
+                if step.undo_action and step.undo_target:
+                    self.undo_stack.append(step)
+                
+                if self.event_bus:
+                    self.event_bus.publish("step_executed", StepExecutedEvent(
+                        step_action=step.action.value,
+                        step_target=step.target,
+                        success=True,
+                        message=f"Step succeeded: {output}"
+                    ))
+                return True, "", int((time.time() - start_time) * 1000)
+
+            duration_ms = int((time.time() - start_time) * 1000)
+            # Execution failed
+            logger.error(
+                "[red]Worker Step %s.%s failed:[/red] %s",
+                task_idx + 1, step_idx + 1, output
+            )
+            
+            if self.event_bus:
+                self.event_bus.publish("step_executed", StepExecutedEvent(
+                    step_action=step.action.value,
+                    step_target=step.target,
+                    success=False,
+                    message=f"Step failed: {output}"
+                ))
+
+            if attempt < config.max_step_retries:
+                logger.info("Auto-restarting step...")
+                await asyncio.sleep(2)
+                continue
+
+            active_app = "Unknown"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'osascript', '-e', 'tell application "System Events" to get name of first application process whose frontmost is true',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                if proc.returncode == 0:
+                    active_app = stdout.decode().strip()
+            except asyncio.TimeoutError:
+                logger.debug("Active app check timed out.")
+            except Exception as e:
+                logger.debug("Failed to get active app: %s", e)
+
+            visible_text = "None"
+            if self.verifier.ui_parser:
+                visible_text = self.verifier.ui_parser.extract_all_text()
+                if len(visible_text) > 1000:
+                    visible_text = visible_text[:1000] + "..."
+
+            feedback = (
+                f"\n\n[SYSTEM FEEDBACK]: Worker Step {task_idx + 1}.{step_idx + 1} "
+                f"(`{step.action.value}` `{step.target}`) failed with error: {output}.\n"
+                f"[CURRENT STATE]:\n"
+                f"- Active App: {active_app}\n"
+                f"- Visible Text: {visible_text}\n"
+                f"CRITICAL INSTRUCTION: DO NOT blindly start from scratch. "
+                f"Analyze the failure to understand the current state."
+            )
+            return False, feedback, duration_ms
+
+        return False, "", 0
+
+    # Dynamic wait times per action type (seconds)
+    WAIT_TIMES = {
+        "hotkey": 1,
+        "type": 2,
+        "click": 3,
+        "open_app": 4,
+        "run_command": 2,
+        "goto": 5,
+        "sleep": 0,
+        "close_browser": 2,
+    }
+
+    async def _verify_with_vision(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        attempt: int,
+    ) -> Tuple[bool, str]:
+        """
+        Runs vision verification for a completed step.
+        Returns (success: bool, failure_feedback: str).
+        Empty feedback with success=False means "retry the step".
+        """
+        # Use dynamic wait time based on the action type
+        wait = self.WAIT_TIMES.get(step.action.value, 4)
+        if wait > 0:
+            logger.info("Waiting for UI to render before taking screenshot (%ds)...", wait)
+            await asyncio.sleep(wait)
+
+        v_success, v_msg = await self.verifier.verify(
+            expected_outcome=step.expected_outcome,
+            target_text=step.target,
+            action=step.action.value
+        )
+
+        if v_success:
+            logger.info("[green]Vision Verification passed:[/green] %s", v_msg)
+            return True, ""
+
+        logger.warning("[yellow]Vision Verification failed:[/yellow] %s", v_msg)
+
+        if attempt < config.max_step_retries:
+            logger.info("Auto-restarting step...")
+            await asyncio.sleep(2)
+            return False, ""  # empty feedback = retry
+
+        # After all retries exhausted: auto-continue if the executor reported success
+        # The executor DID succeed (we only call _verify_with_vision after success),
+        # so the vision model is likely being overly strict. Continue with a warning.
+        logger.warning(
+            "[yellow]Vision uncertain after %d attempts, but executor reported success. "
+            "Auto-continuing...[/yellow]", attempt + 1
+        )
+        if step.undo_action and step.undo_target:
+            self.undo_stack.append(step)
+        return True, ""
+
+    async def rollback(self, n: int = -1) -> None:
+        """
+        Reverses the last `n` steps that have undo actions (or all if `n` = -1).
+        """
+        if not self.undo_stack:
+            return
+
+        limit = len(self.undo_stack) if n == -1 else min(n, len(self.undo_stack))
+        logger.info("[yellow]Rolling back %d actions...[/yellow]", limit)
+
+        for _ in range(limit):
+            step = self.undo_stack.pop()
+            if not step.undo_action or not step.undo_target:
+                continue
+            
+            logger.info("Reversing action: %s %s -> %s %s", step.action.value, step.target, step.undo_action.value, step.undo_target)
+            
+            # Create a reverse step
+            reverse_step = ActionStep(
+                action=step.undo_action,
+                target=step.undo_target,
+                method=step.method, # Assume same method, e.g. cli -> cli
+                expected_outcome="none"
+            )
+            
+            try:
+                await self.executor.execute_step(reverse_step.to_dict())
+            except Exception as e:
+                logger.error("Failed to rollback step %s: %s", step.target, e)
+
+
+
+========================================
+FILE: ./core/voice.py
+========================================
+
+"""
+Voice module for handling local speech-to-text input.
+"""
+import logging
+import speech_recognition as sr
+from rich import print
+
+logger = logging.getLogger("Voice")
+
+class VoiceInput:
+    """Handles listening to the microphone and transcribing audio."""
+
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+
+    def listen(self, timeout=5, phrase_time_limit=15) -> str:
+        """
+        Listen to the microphone and return transcribed text.
+        """
+        try:
+            with sr.Microphone() as source:
+                # Adjust for ambient noise
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                print("\n  [bold #00ff00]Listening... Speak now.[/bold #00ff00]")
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                
+            print("  [#888888]Transcribing...[/#888888]")
+            
+            try:
+                # Try local whisper first
+                # requires: pip install openai-whisper
+                text = self.recognizer.recognize_whisper(audio, model="base.en").strip()
+                logger.debug("Transcribed via Whisper: %s", text)
+                return text
+            except Exception as e:
+                logger.debug("Whisper failed or not installed (%s). Falling back to Google SR.", e)
+                # Fallback to Google SR
+                text = self.recognizer.recognize_google(audio).strip()
+                logger.debug("Transcribed via Google: %s", text)
+                return text
+
+        except sr.WaitTimeoutError:
+            print("  [#ff0000]Listening timed out. No speech detected.[/#ff0000]")
+            return ""
+        except sr.UnknownValueError:
+            print("  [#ff0000]Could not understand audio.[/#ff0000]")
+            return ""
+        except sr.RequestError as e:
+            print(f"  [#ff0000]Could not request results; {e}[/#ff0000]")
+            return ""
+        except Exception as e:
+            print(f"  [#ff0000]Microphone error: {e}[/#ff0000]")
+            return ""
+
+
+========================================
+FILE: ./core/worker.py
+========================================
+
+"""
+Worker module for handling specialized sub-tasks assigned by the Manager (Planner).
+"""
+from core.config import config
+from core.logger import setup_logger
+from core.config import config
+from core.logger import setup_logger
+from core.response_parser import ResponseParser
+from core.protocols import TaskWorker
+from core.events import SystemEvent, EventBus
+from core.prompt_loader import PromptLoader
+from core.base_agent import BaseAgent
+
+logger = setup_logger("Worker")
+
+
+class Worker(BaseAgent):
+    """
+    Executes a specific sub-task given by the Manager.
+    Outputs low-level CLI, GUI, or Browser commands in JSON.
+    """
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus = None) -> None:
+        super().__init__(llm, model_name, prompt_loader)
+        self.event_bus = event_bus
+
+    async def __call__(self, sub_task: str, current_context: str) -> str:
+        return await self.generate_action(sub_task, current_context)
+
+    async def generate_action(self, sub_task: str, current_context: str) -> str:
+        """
+        Takes a specific sub-task and context, and generates the exact JSON step.
+        """
+        system_prompt = self._load_prompt("worker", os_context=config.os_context)
+
+        prompt = f"Context:\n{current_context}\n\nYour Sub-Task:\n{sub_task}"
+
+        logger.debug("Worker (%s) generating action for sub-task: %s", self.model_name, sub_task)
+        if self.event_bus:
+            self.event_bus.publish("agent_action", SystemEvent(
+                source="Worker", level="DEBUG", message=f"Worker parsing sub-task: {sub_task}"
+            ))
+
+        try:
+            content = await self.llm.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+            )
+
+            # Use centralized response parser
+            return ResponseParser.clean_and_extract_json(content, shape="array")
+
+        except Exception as e:
+            logger.error("Worker failed: %s", e)
+            raise e
+
+
+========================================
+FILE: ./main.py
+========================================
+
+"""
+Main entry point for the Local Multi-Agent Automation Framework.
+Pure Terminal/CLI implementation.
+"""
+# pylint: disable=broad-exception-caught, line-too-long
+
+import asyncio
+import sys
+import argparse
+import signal
+
+def _hide_dock_icon():
+    if sys.platform == 'darwin':
+        try:
+            import AppKit
+            # NSApplicationActivationPolicyProhibited = 2
+            # Completely hides the dock icon and menu bar for the Python process
+            app = AppKit.NSApplication.sharedApplication()
+            app.setActivationPolicy_(2)
+        except ImportError:
+            pass
+
+from rich.prompt import Prompt
+from rich.table import Table
+
+from core.config import config
+from core.factory import FrameworkBuilder
+from core.orchestrator import Orchestrator
+from core.health_check import check_dependencies
+from core.logger import setup_logger, console
+from core.voice import VoiceInput
+
+logger = setup_logger("Main")
+
+
+def draw_splash_screen(router_model: str, planner_model: str, vision_model: str) -> None:
+    """Draws the ultra-minimalist 'opencode' style terminal splash screen."""
+
+    # Blocky, solid ASCII Art
+    ascii_art = """[#444444]
+█      ██████  ██████  █████  
+█      
+█     ██    ██ ██     ██   ██ █      
+█     ██    ██ ██     ███████ █      
+█     ██    ██ ██     ██   ██ █      
+█████  ██████   ██████ ██   ██ █████ 
+
+ █████   ██████  ███████ ███    
+██ ████████ 
+██   ██ ██       ██      ████   ██    ██    
+███████ ██   ███ █████   ██ ██  ██    ██    
+██   ██ ██    ██ ██      ██  ██ ██    ██    
+██   ██  ██████  ███████ ██   ████    ██    
+[/#444444]"""
+
+    # Print logo and status
+    console.print(ascii_art)
+    console.print("  [#00ff00]●[/#00ff00] [#888888]Local Agent Terminal[/#888888]\n")
+
+    # Models table (clean, no borders, lots of padding)
+    models_table = Table.grid(padding=(0, 4))
+    models_table.add_column(style="bold #ffffff", width=15)
+    models_table.add_column(style="#888888")
+
+    models_table.add_row("Manager", planner_model)
+    models_table.add_row("Worker", config.worker_model)
+    models_table.add_row("Vision", vision_model)
+
+    # Commands table
+    commands_table = Table.grid(padding=(0, 4))
+    commands_table.add_column(style="bold #ffffff", width=15)
+    commands_table.add_column(style="#888888")
+
+    commands_table.add_row("/model", "Change agent models (e.g., /model manager qwen2.5-coder:14b)")
+    commands_table.add_row("/clear", "Clear the terminal screen")
+    commands_table.add_row("/save", "Save current session state")
+    commands_table.add_row("/quit", "Exit the framework")
+
+    # Layout sections with headers
+    console.print("  [bold #ffffff]Models[/bold #ffffff]")
+    console.print("  [#444444]──────────────[/#444444]")
+    console.print(models_table)
+    console.print()
+
+    console.print("  [bold #ffffff]Commands[/bold #ffffff]")
+    console.print("  [#444444]──────────────[/#444444]")
+    console.print(commands_table)
+    console.print("\n")
+
+
+def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
+    """Handles the /model CLI command to swap AI models on the fly."""
+    if len(parts) == 1:
+        console.print("\n  [bold #ffffff]Current Models[/bold #ffffff]")
+        console.print("  [#444444]──────────────[/#444444]")
+
+        table = Table.grid(padding=(0, 4))
+        table.add_column(style="bold #ffffff", width=15)
+        table.add_column(style="#888888")
+        table.add_row("Manager", orchestrator.planner.model_name)
+        table.add_row("Worker", orchestrator.worker.model_name)
+        table.add_row("Vision", config.vision_model)
+        console.print(table)
+        console.print("\n  [#888888]Usage: /model [manager|worker|vision] [new_model][/#888888]\n")
+    elif len(parts) >= 3:
+        target_agent = parts[1].lower()
+        new_model = parts[2]
+
+        if target_agent == 'manager':
+            orchestrator.router.model_name = new_model
+            orchestrator.planner.model_name = new_model
+            orchestrator.critic.model_name = new_model
+            config.manager_model = new_model
+            config.save()
+            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Manager models changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+        elif target_agent == 'worker':
+            orchestrator.worker.model_name = new_model
+            config.worker_model = new_model
+            config.save()
+            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Worker model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+        elif target_agent == 'vision':
+            config.vision_model = new_model
+            config.save()
+            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Vision model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+        else:
+            console.print("  [#ff0000]x Invalid agent. Use manager, worker, or vision.[/#ff0000]")
+    else:
+        console.print("  [#ff0000]x Usage: /model [manager|worker|vision] [new_model][/#ff0000]")
+
+
+async def async_main(args: argparse.Namespace) -> None:
+    """
+    Asynchronous main loop.
+    This is the COMPOSITION ROOT — the only place where concrete
+    implementations are wired to their abstract interfaces.
+    """
+    # Startup health check
+    if not check_dependencies():
+        logger.critical("Critical dependencies missing - aborting launch")
+        sys.exit(1)
+
+    # === Composition Root via Factory ===
+    orchestrator = FrameworkBuilder.build_orchestrator()
+
+    # Clear terminal before drawing to enforce the clean look
+    console.clear()
+
+    # Draw the premium splash screen
+    draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
+    
+    # Graceful shutdown handler
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler():
+        console.print("\n  [#888888]Shutdown signal received...[/#888888]")
+        shutdown_event.set()
+
+    if sys.platform != 'win32':
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    # Input loop task
+    async def input_loop():
+        while not shutdown_event.is_set():
+            try:
+                # Minimalist prompt
+                user_text = Prompt.ask("[bold #ffffff]/[/bold #ffffff]").strip()
+    
+                if not user_text:
+                    continue
+                if user_text.lower() in ['quit', 'exit', '/quit']:
+                    console.print("\n  [#888888]Shutting down...[/#888888]")
+                    if hasattr(orchestrator.step_runner, "executor"):
+                        await orchestrator.step_runner.executor.shutdown()
+                    break
+    
+                if user_text.lower() == '/help':
+                    console.print("\n  [bold #ffffff]Commands[/bold #ffffff]")
+                    console.print("  [#444444]────────[/#444444]")
+                    help_table = Table.grid(padding=(0, 4))
+                    help_table.add_column(style="bold #ffffff", width=15)
+                    help_table.add_column(style="#888888")
+                    help_table.add_row("/help", "Show this message")
+                    help_table.add_row("/model", "Manage AI models")
+                    help_table.add_row("/voice", "Use voice to dictate a command")
+                    help_table.add_row("/clear", "Clear the terminal screen")
+                    help_table.add_row("/save", "Save current session state")
+                    help_table.add_row("/quit", "Exit the framework")
+                    console.print(help_table)
+                    console.print()
+                    continue
+    
+                if user_text.lower() == '/clear':
+                    console.clear()
+                    draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
+                    continue
+    
+                if user_text.lower() == '/save':
+                    console.print("  [#00ff00]*[/#00ff00] [#888888]Session state saved.[/#888888]")
+                    continue
+    
+                if user_text.lower().startswith('/model'):
+                    parts = user_text.split()
+                    _handle_model_command(orchestrator, parts)
+                    continue
+    
+                if user_text.lower() == '/voice':
+                    voice_input = VoiceInput()
+                    user_text = voice_input.listen()
+                    if not user_text:
+                        continue
+                    console.print(f"  [bold #ffffff]You said:[/bold #ffffff] {user_text}")
+    
+                await orchestrator.process_prompt(user_text)
+    
+            except (KeyboardInterrupt, EOFError):
+                shutdown_event.set()
+            except Exception as e:
+                logger.error("System Error: %s", e)
+    
+    # Run the input loop until shutdown
+    try:
+        input_task = asyncio.create_task(input_loop())
+        await asyncio.wait([input_task, asyncio.create_task(shutdown_event.wait())], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        console.print("\n  [#888888]Cleaning up resources...[/#888888]")
+        if hasattr(orchestrator.step_runner, "executor"):
+            await orchestrator.step_runner.executor.shutdown()
+            
+def main() -> None:
+    """Synchronous entry point."""
+    import sys  # pylint: disable=import-outside-toplevel
+    import warnings  # pylint: disable=import-outside-toplevel
+
+    parser = argparse.ArgumentParser(description="Local Multi-Agent Automation Framework (Terminal Edition)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+    
+    if args.debug:
+        import os
+        os.environ["DEBUG"] = "True"
+
+    # Suppress ugly internal asyncio Proactor pipe warnings on Windows shutdown
+    warnings.filterwarnings("ignore", category=ResourceWarning)
+
+    if sys.platform == 'win32':
+        try:
+            from asyncio.proactor_events import _ProactorBasePipeTransport  # type: ignore
+            def _silence_closed_pipe(self):  # type: ignore
+                pass
+            _ProactorBasePipeTransport.__del__ = _silence_closed_pipe  # type: ignore
+        except Exception:
+            pass
+
+    _hide_dock_icon()
+
+    try:
+        asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
+
+
+========================================
+FILE: ./memory/__init__.py
+========================================
+
+"""Memory package for the Multi-Agent Framework."""
+
+
+========================================
+FILE: ./memory/chroma_store.py
+========================================
+
+"""
+Memory module for storing and retrieving successful and failed plans using ChromaDB.
+"""
+import os
+import uuid
+from typing import Optional
+
+import chromadb
+
+from core.config import config
+from core.logger import setup_logger
+
+logger = setup_logger("ChromaStore")
+
+# Resolve chroma_db relative to the project root, not os.getcwd()
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CHROMA_DB_PATH = os.path.join(_PROJECT_ROOT, "chroma_db")
+
+
+class ChromaStore:
+    """
+    Handles interactions with ChromaDB for semantic memory retrieval.
+    Stores past execution plans and their success/failure states.
+    """
+    def __init__(self) -> None:
+        # Initialize chromadb persistent client
+        self.client = chromadb.PersistentClient(path=_CHROMA_DB_PATH)
+        self.success_collection = self.client.get_or_create_collection(
+            name="successful_plans")
+        self.failure_collection = self.client.get_or_create_collection(
+            name="failed_plans")
+        self.episodes_collection = self.client.get_or_create_collection(
+            name="episodes")
+
+    def get_plan(self, task_description: str) -> Optional[str]:
+        """Query ChromaDB for an exact or highly similar task."""
+        try:
+            results = self.success_collection.query(
+                query_texts=[task_description],
+                n_results=1
+            )
+            if results and results.get('documents') and len(
+                    results['documents'][0]) > 0:
+                # Check distance to ensure high confidence
+                distance = results['distances'][0][0]
+                if distance < config.memory_success_threshold:
+                    logger.debug(
+                        "Found cached plan with distance: %s", distance)
+                    return results['documents'][0][0]
+            return None
+        except (ValueError, OSError) as e:
+            logger.error("Error querying success collection: %s", e)
+            return None
+
+    def save_plan(self, task_description: str, plan_json: str) -> None:
+        """Save a successful plan to ChromaDB using UUIDs."""
+        try:
+            doc_id = str(uuid.uuid4())
+            self.success_collection.add(
+                documents=[plan_json],
+                metadatas=[{"task": task_description}],
+                ids=[doc_id]
+            )
+            logger.debug(
+                "Successfully saved plan to ChromaStore with ID: %s", doc_id)
+        except (ValueError, OSError) as e:
+            logger.error("Error saving to success collection: %s", e)
+
+    def get_failures(self, task_description: str) -> list:
+        """Get past failed strategies for a similar task."""
+        try:
+            results = self.failure_collection.query(
+                query_texts=[task_description],
+                n_results=3
+            )
+            failures = []
+            if results and results.get('documents') and len(
+                    results['documents']) > 0:
+                for idx, doc in enumerate(results['documents'][0]):
+                    distance = results['distances'][0][idx]
+                    if distance < config.memory_failure_threshold:
+                        reason = results['metadatas'][0][idx].get(
+                            'reason', 'Unknown reason')
+                        failures.append({'plan': doc, 'reason': reason})
+            return failures
+        except (ValueError, OSError) as e:
+            logger.error("Error querying failure collection: %s", e)
+            return []
+
+    def save_failure(
+            self,
+            task_description: str,
+            failed_plan: str,
+            reason: str) -> None:
+        """Save a failed plan to ChromaDB."""
+        try:
+            doc_id = str(uuid.uuid4())
+            self.failure_collection.add(
+                documents=[failed_plan],
+                metadatas=[{"task": task_description, "reason": reason}],
+                ids=[doc_id]
+            )
+            logger.info(
+                "Logged failed plan to Reflection Memory to prevent future recurrence.")
+        except (ValueError, OSError) as e:
+            logger.error("Error saving to failure collection: %s", e)
+
+    def save_episode(self, episode_data: dict) -> None:
+        """Store a complete execution trace (episode)."""
+        import json
+        try:
+            doc_id = str(uuid.uuid4())
+            task = episode_data.get("task", "unknown_task")
+            self.episodes_collection.add(
+                documents=[json.dumps(episode_data)],
+                metadatas=[{"task": task}],
+                ids=[doc_id]
+            )
+            logger.debug("Saved episode trace to ChromaDB with ID: %s", doc_id)
+        except Exception as e:
+            logger.error("Error saving episode: %s", e)
+
+    def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
+        """Retrieve similar past episodes."""
+        import json
+        try:
+            results = self.episodes_collection.query(
+                query_texts=[task_description],
+                n_results=limit
+            )
+            episodes = []
+            if results and results.get('documents') and len(results['documents']) > 0:
+                for idx, doc in enumerate(results['documents'][0]):
+                    distance = results['distances'][0][idx]
+                    if distance < config.memory_episode_threshold:
+                        try:
+                            ep_dict = json.loads(doc)
+                            ep_dict["_distance"] = distance
+                            episodes.append(ep_dict)
+                        except Exception:
+                            pass
+            return episodes
+        except (ValueError, OSError) as e:
+            logger.error("Error querying episodes: %s", e)
+            return []
+
+    def close(self) -> None:
+        """Gracefully release the ChromaDB connection and flush to disk."""
+        try:
+            logger.debug("Closing ChromaStore and flushing to disk...")
+            # PersistentClient doesn't strictly require closing, but clearing references 
+            # helps trigger garbage collection of the SQLite connections.
+            self.success_collection = None
+            self.failure_collection = None
+            self.episodes_collection = None
+            self.client = None
+        except Exception as e:
+            logger.error("Error closing ChromaStore: %s", e)
+
+
+========================================
+FILE: ./memory/preferences.py
+========================================
+
+"""
+User preferences tracking.
+"""
+import asyncio
+import os
+import json
+from datetime import datetime
+
+from core.logger import setup_logger
+
+logger = setup_logger("UserPreferences")
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PREFS_FILE = os.path.join(_PROJECT_ROOT, "user_preferences.json")
+
+class UserPreferences:
+    """Tracks and saves user preferences and app usage habits."""
+    def __init__(self) -> None:
+        self.prefs = {
+            "apps_used": {},
+            "last_updated": ""
+        }
+        # Note: load() must now be awaited by the Orchestrator after initialization
+
+    async def load(self) -> None:
+        """Load preferences from disk asynchronously."""
+        if os.path.exists(_PREFS_FILE):
+            try:
+                def read_file():
+                    with open(_PREFS_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                data = await asyncio.to_thread(read_file)
+                self.prefs.update(data)
+            except Exception as e:
+                logger.error("Failed to load user preferences: %s", e)
+
+    async def save(self) -> None:
+        """Save preferences to disk asynchronously."""
+        self.prefs["last_updated"] = datetime.now().isoformat()
+        try:
+            def write_file():
+                with open(_PREFS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(self.prefs, f, indent=4)
+            await asyncio.to_thread(write_file)
+        except Exception as e:
+            logger.error("Failed to save user preferences: %s", e)
+
+    async def log_app_usage(self, app_name: str) -> None:
+        """Log that an application was used."""
+        if not app_name or app_name.strip() == "":
+            return
+            
+        if "apps_used" not in self.prefs:
+            self.prefs["apps_used"] = {}
+            
+        count = self.prefs["apps_used"].get(app_name, 0)
+        self.prefs["apps_used"][app_name] = count + 1
+        await self.save()
+
+    def get_context_string(self) -> str:
+        """Get a string representation of preferences to inject into LLM prompts."""
+        apps = self.prefs.get("apps_used", {})
+        if not apps:
+            return ""
+        
+        # Sort by usage count descending
+        sorted_apps = sorted(apps.items(), key=lambda x: x[1], reverse=True)
+        top_apps = [name for name, _ in sorted_apps[:3]]
+        
+        return f"User's most frequently used apps: {', '.join(top_apps)}."
+
+
+========================================
+FILE: ./memory/skill_library.py
+========================================
+
+"""
+Skill library for caching and reusing successful action sequences.
+"""
+import os
+import json
+import re
+from datetime import datetime
+from typing import Optional
+
+from core.logger import setup_logger
+
+logger = setup_logger("SkillLibrary")
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SKILLS_DIR = os.path.join(_PROJECT_ROOT, "skills")
+
+class SkillLibrary:
+    """Manages reusable skills generated from past successful plans."""
+    
+    def __init__(self) -> None:
+        if not os.path.exists(_SKILLS_DIR):
+            os.makedirs(_SKILLS_DIR, exist_ok=True)
+
+    def _get_safe_name(self, text: str) -> str:
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', text.lower())[:50].strip('_')
+        return safe_name
+
+    def save_skill(self, task_description: str, plan_json: str) -> None:
+        """Saves a successful plan as a reusable skill."""
+        safe_name = self._get_safe_name(task_description)
+        if not safe_name:
+            return
+            
+        file_path = os.path.join(_SKILLS_DIR, f"{safe_name}.json")
+        
+        # Base skill structure
+        skill = {
+            "skill_id": safe_name,
+            "trigger_phrases": [task_description.lower()],
+            "plan_json": plan_json,
+            "success_count": 0,
+            "fail_count": 0,
+            "last_used": ""
+        }
+        
+        # Load existing if it exists to merge data
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                    skill.update(existing)
+                    
+                # Update plan in case the new one is better/different
+                skill["plan_json"] = plan_json
+                    
+                # Add trigger phrase if new
+                task_lower = task_description.lower()
+                if task_lower not in skill["trigger_phrases"]:
+                    skill["trigger_phrases"].append(task_lower)
+            except Exception as e:
+                logger.error("Failed to read existing skill %s: %s", file_path, e)
+                
+        skill["success_count"] += 1
+        skill["last_used"] = datetime.now().isoformat()
+        
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(skill, f, indent=4)
+            logger.debug("Saved skill '%s' to library.", safe_name)
+        except Exception as e:
+            logger.error("Failed to save skill: %s", e)
+
+    def mark_failure(self, task_description: str) -> None:
+        """Mark a skill as failed to deprioritize it over time."""
+        safe_name = self._get_safe_name(task_description)
+        file_path = os.path.join(_SKILLS_DIR, f"{safe_name}.json")
+        
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    skill = json.load(f)
+                skill["fail_count"] += 1
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(skill, f, indent=4)
+                logger.debug("Marked skill '%s' as failed.", safe_name)
+            except Exception as e:
+                logger.error("Failed to mark skill failure: %s", e)
+
+    def get_skill_plan(self, task_description: str) -> Optional[str]:
+        """Look for a matching skill with a high success rate."""
+        task_lower = task_description.lower()
+        
+        best_match = None
+        best_success_rate = -1.0
+        
+        try:
+            for fname in os.listdir(_SKILLS_DIR):
+                if not fname.endswith(".json"):
+                    continue
+                    
+                file_path = os.path.join(_SKILLS_DIR, fname)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        skill = json.load(f)
+                    
+                    # Check if the task description matches any trigger
+                    matched = False
+                    for trigger in skill.get("trigger_phrases", []):
+                        # Simple substring match (could be upgraded to embeddings later)
+                        if trigger in task_lower or task_lower in trigger:
+                            matched = True
+                            break
+                            
+                    if matched:
+                        successes = skill.get("success_count", 0)
+                        fails = skill.get("fail_count", 0)
+                        total = successes + fails
+                        rate = successes / total if total > 0 else 1.0
+                        
+                        # Only use skills with >= 50% success rate
+                        if rate >= 0.5 and rate > best_success_rate:
+                            best_match = skill.get("plan_json")
+                            best_success_rate = rate
+                except Exception as e:
+                    logger.error("Error reading skill %s: %s", fname, e)
+                    continue
+        except Exception as e:
+            logger.error("Error iterating skills directory: %s", e)
+            
+        if best_match:
+            logger.info("Found matching skill with success rate %.0f%%", best_success_rate * 100)
+            
+        return best_match
+
+
+========================================
+FILE: ./plugins/README.md
+========================================
+
+# Executor Plugins
+
+Drop a `.py` file into this directory and it will be automatically discovered and loaded by the framework at startup.
+
+## How to Write a Plugin
+
+Each plugin file must define a class with:
+1. An `async def execute(self, action: str, target: str) -> tuple[bool, str]` method
+2. A `PLUGIN_NAME: str` class attribute (used for logging)
+3. An `ACTIONS: list[str]` class attribute listing the action names it handles
+
+### Example: `spotify_plugin.py`
+
+```python
+from core.executor.base import BaseExecutor
+
+class SpotifyExecutor(BaseExecutor):
+    PLUGIN_NAME = "spotify"
+    ACTIONS = ["play_music", "pause_music", "next_track"]
+
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
+        import subprocess
+        if action == "play_music":
+            script = f'tell application "Spotify" to play track "{target}"'
+            subprocess.run(["osascript", "-e", script], check=False)
+            return True, f"Playing {target} on Spotify"
+        if action == "pause_music":
+            subprocess.run(["osascript", "-e", 'tell application "Spotify" to pause'], check=False)
+            return True, "Paused Spotify"
+        return False, f"Unknown spotify action: {action}"
+```
+
+### How it works
+
+1. On startup, `ExecutorDispatcher._load_plugins()` scans this directory.
+2. For each `.py` file, it imports the module and looks for classes with an `execute` method.
+3. If the class has an `ACTIONS` list, each action name is registered as a route.
+4. When the Worker produces a step with a matching action, the plugin handles it automatically.
+
+### Notes
+- Plugin classes are instantiated with no arguments. If you need constructor args, override `__init__`.
+- Plugins can optionally define `async def shutdown(self)` for cleanup.
+- The framework logs which plugins are loaded at startup.
+
+
+========================================
+FILE: ./plugins/__init__.py
+========================================
+
+# Plugins are auto-discovered by the ExecutorDispatcher.
+
+
+========================================
+FILE: ./prompts/critic.yaml
+========================================
+
+system_prompt: |
+  You are the Critic Agent for an OS automation system. 
+  Your job is to review a proposed JSON execution plan generated by a Planner Agent to fulfill a User Task.
+
+  RULES:
+  1. Ensure the plan logically accomplishes the user's request.
+  2. Reject plans that use dangerous commands (e.g., formatting disks, deleting system files, fork bombs).
+  3. Reject plans that seem to hallucinate steps unrelated to the goal.
+  4. If the plan is good, set "approved" to true.
+  5. If the plan is bad, set "approved" to false and provide specific "feedback" detailing what is wrong so the Planner can fix it.
+  6. HUMAN SEARCH BEHAVIOR: DO NOT penalize or reject plans for deciding to use a search engine (like Google) instead of navigating directly to a URL. Humans use search engines to find websites like Gemini AI. It is the intended behavior.
+  7. BE LENIENT AND PRAGMATIC. Do not reject a plan over minor pedantic details, semantic arguments (e.g., debating whether an AI is a "search engine"), or slight inefficiencies.
+  8. UNDERSTAND AI INTERACTIONS: If the user asks to "find info about X on Gemini/ChatGPT", it is PERFECTLY LOGICAL for the plan to navigate to that AI and query it for the information. Do not reject plans for assuming an AI can provide information about a topic.
+  8. Only reject a plan if it is dangerous, completely impossible, or entirely ignores the core user goal. If a plan is "good enough" to achieve the basic goal, approve it!
+
+  OUTPUT FORMAT:
+  You must output ONLY valid JSON in this exact format.
+  {
+      "approved": true | false,
+      "feedback": "Your critique here."
+  }
+
+
+========================================
+FILE: ./prompts/planner.yaml
+========================================
+
+system_prompt: |
+  You are the Manager Agent (Planner) for a local OS controller.
+  {{os_context}}
+  Your job is to break down the user's task into a strict JSON array of objects.
+  These sub-tasks will be passed to a specialized Worker Agent to execute.
+
+  RULES:
+  1. Keep the steps high-level and focused on the goal.
+  2. Do not specify exact CSS selectors or CLI commands. The Worker handles that.
+  3. RECOVERY MODE: If you receive `[SYSTEM FEEDBACK]` detailing a failure, YOU ARE IN RECOVERY MODE. You must ONLY output the steps required to recover from the current state. Do NOT output steps that have already succeeded (such as 'Open the browser') unless the feedback explicitly states the application crashed.
+  4. BROWSER STEPS: For web browsing tasks, instruct the worker to navigate to a URL or search directly (e.g. "Navigate to example.com" or "Search for Google Gemini"). The Worker's browser executor handles launching the browser automatically.
+  5. DO NOT guess direct URLs unless obvious. You can simply instruct the Worker to search for a query.
+  6. To open a local application, output a single step like "Open the [App Name] application natively".
+  7. CLI-FIRST: For information-gathering tasks (disk space, battery, system info, file listings), prefer a single CLI command step (e.g. "Run a terminal command to check disk space") over opening GUI apps. CLI is faster and more reliable.
+  8. PARALLEL EXECUTION: If multiple steps can run at the same time independently (e.g., downloading two files, checking two separate system stats), mark "parallel": true for those steps. They will be executed concurrently. If steps depend on each other, mark "parallel": false.
+  9. DELEGATION: If the user request implies a task that perfectly matches one of the `[AVAILABLE AGENTS]`, you MUST add a `"delegate_to": "Agent Name"` field to that specific step. Do not delegate to an agent if its tools cannot complete the task.
+
+  OUTPUT FORMAT:
+  You must output ONLY valid JSON in this exact format. No markdown blocks.
+  [
+      {"task": "High level step 1", "parallel": false},
+      {"task": "Independent step 2A", "parallel": true},
+      {"task": "Independent step 2B", "parallel": true, "delegate_to": "Research Agent"}
+  ]
+
+  EXAMPLES:
+  User: "open brave"
+  [{"task": "Open the Brave browser", "parallel": false}]
+  
+  User: "open gemini ai in brave and search for rats"
+  [
+      {"task": "Open Brave browser and search for 'Gemini AI'", "parallel": false},
+      {"task": "Click the official Google Gemini AI link from the search results", "parallel": false},
+      {"task": "Search for 'rats' in the Gemini AI chat interface", "parallel": false}
+  ]
+
+
+========================================
+FILE: ./prompts/router.yaml
+========================================
+
+routing_prompt: |
+  You are a routing agent for a local OS controller.
+  Classify the user's input as either 'question', 'visual_question', or 'task'.
+
+  - 'task': The user is explicitly instructing you to perform a physical action on the computer on their behalf, like opening an app, taking a screenshot, running a command, clicking, or managing files.
+  - 'visual_question': The user is asking a question about what is currently visible on their screen (e.g., "can you see X on my screen", "what is open", "read the text on my screen").
+  - 'question': The user is chatting, greeting, asking for information, OR asking for instructions (e.g., "how to do X", "what is the shortcut for Y"). If they ask "how to", it is a question, not a task.
+
+  OUTPUT FORMAT:
+  You must output ONLY valid JSON in this exact format.
+  {
+      "intent": "task" | "visual_question" | "question"
+  }
+chat_prompt: |
+  You are an advanced Local OS Automation Agent. Your primary purpose is to control the user's computer, automate tasks, open applications, and manage files on their behalf. The user is currently asking you a conversational question. Answer concisely and helpfully, and keep your identity as a Local OS Agent clear.
+
+
+========================================
+FILE: ./prompts/safety.yaml
+========================================
+
+safety_prompt: |
+  You are the Intelligent Security Gate for an autonomous OS agent. 
+  Your job is to evaluate whether a proposed shell command is SAFE to run autonomously, or DANGEROUS/DESTRUCTIVE.
+
+  - 'SAFE': Commands that are harmless, read-only, create small files, move standard files, install standard packages, or perform basic system interactions (e.g., `mkdir`, `touch`, `ls`, `cat`, `echo`, `pip install`, `brew install`).
+  - 'DANGEROUS': Commands that could cause system instability, delete important files, overwrite critical configurations, disable security features, or exfiltrate data (e.g., `rm -rf /`, `chmod 777 /`, commands that pipe to `bash` from curl, downloading unverified binaries).
+
+  OUTPUT FORMAT:
+  You must output ONLY valid JSON in this exact format.
+  {
+      "intent": "SAFE" | "DANGEROUS",
+      "reason": "Brief 1 sentence explanation"
+  }
+
+
+========================================
+FILE: ./prompts/worker.yaml
+========================================
+
+system_prompt: |
+  You are a specialized Worker Agent. Your job is to take a specific sub-task from the Manager and translate it into EXACT executable commands.
+  {{os_context}}
+
+  RULES:
+  1. YOU MUST PRIORITIZE CLI ACTIONS for system management.
+  2. To OPEN LOCAL APPLICATIONS (including web browsers), use "method": "system", "action": "open_app". The "target" MUST be just the app name (e.g. "Brave Browser", "Safari"), NOT an absolute path.
+  3. BROWSER INTERACTION: For all web browsing tasks, YOU MUST use "method": "browser". Use "action": "goto" to navigate to a URL. The browser executor handles launching the browser and smart search automatically.
+  4. DOM INTERACTION: For interacting with web pages, ALWAYS use "method": "browser" with "action": "click_dom" (target: CSS selector or text) or "action": "type_dom" (target format: "selector:::text"). Do NOT use "gui" actions like hotkeys or pyautogui.write for websites.
+  5. GUI FALLBACK: Only use "method": "gui" with "click" or "type" for desktop applications, NOT for web browsers.
+  
+  OUTPUT FORMAT:
+  You must output ONLY valid JSON in this exact format. No markdown blocks, no other text.
+  [
+      {
+          "action": "run_command" | "click" | "type" | "hotkey" | "goto" | "click_dom" | "type_dom" | "sleep" | "close_browser" | "open_app",
+          "target": "string (command, element name/description, URL, or seconds)",
+          "method": "cli" | "gui" | "browser" | "system",
+          "expected_outcome": "A short description of what should visibly happen on the screen. Use 'none' to skip vision verification for intermediate steps like hotkeys.",
+          "undo_action": "(Optional) The action verb to reverse this step (e.g. 'run_command')",
+          "undo_target": "(Optional) The target to reverse this step (e.g. 'rm -rf /tmp/file')"
+      }
+  ]
+
+  EXAMPLE BROWSER SEARCH:
+  [
+      {
+          "action": "goto",
+          "target": "Google Gemini AI",
+          "method": "browser",
+          "expected_outcome": "Navigated to search results for Google Gemini AI."
+      },
+      {
+          "action": "click_dom",
+          "target": "text=Sign in",
+          "method": "browser",
+          "expected_outcome": "Clicked the sign in button."
+      }
+  ]
+
+
+========================================
+FILE: ./requirements.txt
+========================================
+
+pyobjc-core<12.0
+pyobjc-framework-Quartz<12.0
+pyobjc-framework-ApplicationServices<12.0
+pyobjc-framework-CoreText<12.0
+pyobjc-framework-Cocoa<12.0
+pyobjc<12.0
+textual>=0.40.0
+ollama>=0.1.6
+chromadb>=0.4.22
+mss>=9.0.1
+pyautogui>=0.9.54
+pynput>=1.7.6
+playwright>=1.40.0
+Pillow>=10.2.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+psutil
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.14
+fastapi
+uvicorn
+websockets
+pyyaml
+
+
+========================================
+FILE: ./tests/conftest.py
+========================================
+
+import pytest
+from core.models import ActionStep, MethodType
+
+class FakeLLMClient:
+    """A fake LLM client for testing without network calls."""
+    def __init__(self, responses: list[str] = None):
+        self.responses = responses or []
+        self.call_count = 0
+        self.last_prompt = ""
+
+    async def chat(self, model: str, messages: list[dict], format: str = None) -> str:
+        self.call_count += 1
+        self.last_prompt = str(messages)
+        if self.responses:
+            return self.responses.pop(0)
+        return '{"result": "mocked"}'
+
+class FakeExecutor:
+    """A fake Executor for testing StepRunner."""
+    def __init__(self):
+        self.executed_steps = []
+        self.mock_success = True
+        self.mock_output = "Mocked output"
+
+    async def execute_step(self, step_dict: dict) -> tuple[bool, str]:
+        self.executed_steps.append(step_dict)
+        return self.mock_success, self.mock_output
+
+class FakeVerifier:
+    """A fake Vision Verifier."""
+    def __init__(self):
+        self.ui_parser = None
+        self.mock_success = True
+        self.mock_feedback = "Looks good"
+
+    async def verify(self, expected_outcome: str, target_text: str, action: str) -> tuple[bool, str]:
+        return self.mock_success, self.mock_feedback
+
+@pytest.fixture
+def fake_llm():
+    return FakeLLMClient()
+
+@pytest.fixture
+def fake_executor():
+    return FakeExecutor()
+
+@pytest.fixture
+def fake_verifier():
+    return FakeVerifier()
+
+
+========================================
+FILE: ./tests/fakes/__init__.py
+========================================
+
+# Package marker
+
+
+========================================
+FILE: ./tests/fakes/memory.py
+========================================
+
+from typing import Optional
+
+class InMemoryStore:
+    """
+    Simple in-memory implementation of MemoryStore for testing.
+    No persistence, no semantic search — just exact-match lookups.
+    """
+
+    def __init__(self) -> None:
+        self._plans: dict[str, str] = {}
+        self._failures: list[dict] = []
+        self._episodes: list[dict] = []
+
+    def get_plan(self, task_description: str) -> Optional[str]:
+        return self._plans.get(task_description)
+
+    def save_plan(self, task_description: str, plan_json: str) -> None:
+        self._plans[task_description] = plan_json
+
+    def get_failures(self, task_description: str) -> list:
+        return [
+            f for f in self._failures
+            if task_description.lower() in f.get("task", "").lower()
+        ]
+
+    def save_failure(
+        self, task_description: str, failed_plan: str, reason: str
+    ) -> None:
+        self._failures.append({
+            "task": task_description,
+            "plan": failed_plan,
+            "reason": reason,
+        })
+
+    def save_episode(self, episode_data: dict) -> None:
+        self._episodes.append(episode_data)
+
+    def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
+        return self._episodes[:limit]
+
+    def close(self) -> None:
+        pass
+
+
+========================================
+FILE: ./tests/test_safety_gate.py
+========================================
+
+import pytest
+from core.safety_gate import SafetyGate
+
+def test_safety_gate_whitelist():
+    gate = SafetyGate()
+    # Whitelisted
+    assert gate.is_safe("ls -la") is True
+    assert gate.is_safe("echo hello") is True
+    assert gate.is_safe("pwd") is True
+    
+    # Not whitelisted -> false
+    assert gate.is_safe("rm -rf /") is False
+    assert gate.is_safe("sudo rm file") is False
+    assert gate.is_safe("format C:") is False
+    
+    # Metacharacters -> false
+    assert gate.is_safe("echo 'hello' > /dev/sda") is False
+    assert gate.is_safe("echo test | bash") is False
+    assert gate.is_safe("ls & whoami") is False
+
+def test_allowlist():
+    gate = SafetyGate()
+    gate.allowed_base_commands = {"git"}
+    assert gate.is_safe("git status") is True
+    assert gate.is_safe("ls -la") is False
+    assert gate.is_safe("git log > file") is False
+
+
+========================================
+FILE: ./tests/test_step_runner.py
+========================================
+
+import pytest
+import json
+from core.step_runner import StepRunner
+from core.safety_gate import SafetyGate
+
+class FakeWorker:
+    def __init__(self, mock_response: str):
+        self.mock_response = mock_response
+
+    async def generate_action(self, sub_task: str, current_context: str) -> str:
+        return self.mock_response
+
+@pytest.mark.asyncio
+async def test_step_runner_success(fake_executor, fake_verifier):
+    mock_json = json.dumps([
+        {
+            "action": "run_command",
+            "target": "echo hello",
+            "method": "cli",
+            "expected_outcome": "none"
+        }
+    ])
+    worker = FakeWorker(mock_json)
+    runner = StepRunner(worker, fake_executor, fake_verifier, SafetyGate())
+
+    success, feedback, steps_exec = await runner.run(["do something"])
+    
+    assert success is True
+    assert feedback == ""
+    assert len(steps_exec) == 1
+    assert len(fake_executor.executed_steps) == 1
+    assert fake_executor.executed_steps[0]["action"] == "run_command"
+
+@pytest.mark.asyncio
+async def test_step_runner_executor_failure(fake_executor, fake_verifier):
+    mock_json = json.dumps([
+        {
+            "action": "run_command",
+            "target": "fail_command",
+            "method": "cli",
+            "expected_outcome": "none"
+        }
+    ])
+    worker = FakeWorker(mock_json)
+    runner = StepRunner(worker, fake_executor, fake_verifier, SafetyGate())
+
+    fake_executor.mock_success = False
+    fake_executor.mock_output = "Command not found"
+
+    success, feedback, steps_exec = await runner.run(["do something"])
+    
+    assert success is False
+    assert "Command not found" in feedback
+
+
+========================================
+FILE: ./vision/__init__.py
+========================================
+
+"""Vision package for the Multi-Agent Framework."""
+
+
+========================================
+FILE: ./vision/screen_capture.py
+========================================
+
+"""
+Screen capture utility using the `mss` library.
+Provides extremely fast, native screenshot capabilities.
+
+Refactored to:
+- Use context manager per capture (resilient to display config changes)
+- Support timestamped filenames for debugging vision trails
+"""
+import os
+import time
+
+import mss
+import mss.tools
+
+from core.logger import setup_logger
+
+logger = setup_logger("ScreenCapture")
+
+# Resolve screenshots directory relative to project root
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SCREENSHOTS_DIR = os.path.join(_PROJECT_ROOT, "screenshots")
+
+
+class ScreenCapture:  # pylint: disable=too-few-public-methods
+    """
+    Handles taking fullscreen screenshots of the primary monitor.
+    Uses a fresh mss instance per capture for resilience to display changes.
+    """
+
+    def __init__(self, save_dir: str | None = None) -> None:
+        self._save_dir = save_dir or _SCREENSHOTS_DIR
+        os.makedirs(self._save_dir, exist_ok=True)
+
+    def capture_fullscreen(
+        self, output_filename: str = "screenshot.png"
+    ) -> str:
+        """
+        Captures the entire screen and saves it to a PNG file.
+        Returns the absolute path to the saved image.
+        """
+        try:
+            # Use context manager for resilience to display changes
+            # (clamshell mode, external monitor plug/unplug)
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]
+                output = sct.grab(monitor)
+
+                # Generate timestamped filename for debugging trail
+                base, ext = os.path.splitext(output_filename)
+                timestamp = int(time.time())
+                timestamped_name = f"{base}_{timestamp}{ext}"
+
+                output_path = os.path.join(self._save_dir, timestamped_name)
+                mss.tools.to_png(
+                    output.rgb, output.size, output=output_path
+                )
+
+                # Also save a "latest" copy for quick access
+                latest_path = os.path.join(self._save_dir, output_filename)
+                mss.tools.to_png(
+                    output.rgb, output.size, output=latest_path
+                )
+
+                logger.debug(
+                    "Captured screenshot to %s", output_path
+                )
+                
+                self.cleanup()
+                return latest_path
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to capture screen: %s", e)
+            raise e
+
+    def capture_region(
+        self, x: int, y: int, width: int, height: int, output_filename: str = "region.png"
+    ) -> str:
+        """
+        Captures a specific region of the screen and saves it to a PNG file.
+        Returns the absolute path to the saved image.
+        """
+        try:
+            with mss.mss() as sct:
+                # The bounding box of the monitor
+                monitor = sct.monitors[1]
+                
+                # Define the region to capture, offset by the monitor's top/left
+                region = {
+                    "top": monitor["top"] + y,
+                    "left": monitor["left"] + x,
+                    "width": width,
+                    "height": height
+                }
+                
+                output = sct.grab(region)
+
+                base, ext = os.path.splitext(output_filename)
+                timestamp = int(time.time())
+                timestamped_name = f"{base}_{timestamp}{ext}"
+
+                output_path = os.path.join(self._save_dir, timestamped_name)
+                mss.tools.to_png(output.rgb, output.size, output=output_path)
+
+                latest_path = os.path.join(self._save_dir, output_filename)
+                mss.tools.to_png(output.rgb, output.size, output=latest_path)
+
+                logger.debug("Captured region to %s", output_path)
+                
+                self.cleanup()
+                return latest_path
+
+        except Exception as e:
+            logger.error("Failed to capture screen region: %s", e)
+            raise e
+
+    def cleanup(self, max_files: int = 10) -> None:
+        """
+        Cleans up old timestamped screenshots to prevent disk space bloat.
+        Keeps only the most recent `max_files` images.
+        """
+        try:
+            files = []
+            for filename in os.listdir(self._save_dir):
+                if filename.endswith(".png") and "screenshot" not in filename and "region" not in filename:
+                    pass # We only want to sort the timestamped ones
+                
+                # Gather all timestamped files
+                if filename.endswith(".png") and ("_" in filename):
+                    filepath = os.path.join(self._save_dir, filename)
+                    if os.path.isfile(filepath):
+                        files.append((filepath, os.path.getmtime(filepath)))
+            
+            # Sort by modification time, newest first
+            files.sort(key=lambda x: x[1], reverse=True)
+            
+            # Delete older files
+            if len(files) > max_files:
+                for file_path, _ in files[max_files:]:
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.debug("Failed to cleanup old screenshots: %s", e)
+
+
+========================================
+FILE: ./vision/ui_parser.py
+========================================
+
+"""
+Vision-based UI Parser for locating elements on screen.
+Uses OpenCV and Tesseract OCR, with a fallback to Windows UIAutomation.
+"""
+# pylint: disable=no-member, too-many-locals
+import os
+from typing import Optional, Tuple
+
+import cv2
+import mss
+import numpy as np
+import pytesseract
+
+from core.logger import setup_logger
+
+logger = setup_logger("UIParser")
+
+
+class UIParser: # pylint: disable=too-few-public-methods
+    """
+    Parses the screen to find the coordinates of UI elements based on text descriptions.
+    """
+    def __init__(self) -> None:
+        import shutil
+        tesseract_path = shutil.which('tesseract')
+        if tesseract_path:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        else:
+            logger.warning("tesseract executable not found in PATH.")
+
+    def find_element(
+            self, element_description: str) -> Optional[Tuple[int, int]]:
+        """
+        Uses OCR as the primary method to find text on screen.
+        Falls back to Windows Accessibility Tree if OCR fails.
+        """
+        logger.info(
+            "Scanning for '%s' using Vision OCR...", element_description)
+        coords = self._find_element_ocr(element_description)
+
+        if coords:
+            return coords
+
+        logger.warning(
+            "OCR failed to find '%s'.", element_description)
+        return None
+
+    def _find_element_ocr(
+            self, element_description: str) -> Optional[Tuple[int, int]]: # pylint: disable=too-many-locals
+        """
+        Captures the screen and uses OpenCV + Tesseract to find bounding boxes of text.
+        Attempts to use C++ vision_ext for speed, falling back to Python.
+        """
+        try:
+            # 1. Capture screen using context manager for display resilience
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]  # primary monitor
+                screenshot = sct.grab(monitor)
+
+            # Convert to numpy array for OpenCV
+            img = np.array(screenshot)
+
+            # Try C++ extension first
+            try:
+                import vision_ext
+                logger.debug("Using C++ vision_ext for OCR...")
+                coords = vision_ext.find_element(img, element_description)
+                if coords:
+                    center_x, center_y = coords
+                    center_x += monitor['left']
+                    center_y += monitor['top']
+                    logger.info("C++ OCR Found '%s' at (%s, %s)", element_description, center_x, center_y)
+                    return (center_x, center_y)
+                return None
+            except ImportError:
+                logger.debug("vision_ext not available. Falling back to Python implementation.")
+            except Exception as e:
+                logger.error("C++ vision_ext failed: %s. Falling back.", e)
+
+            # Convert from BGRA (mss default) to BGR, then to Grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+
+            # 2. Pre-processing: Apply thresholding to make text pop
+            # We use an inverted binary threshold combined with Otsu's method
+            # to handle varying backgrounds (dark mode vs light mode).
+            _, thresh = cv2.threshold(
+                gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+            # 3. Run Tesseract to get data
+            # psm 11 means: Sparse text. Find as much text as possible in no
+            # particular order.
+            custom_config = r'--oem 3 --psm 11'
+            data = pytesseract.image_to_data(
+                thresh, output_type=pytesseract.Output.DICT, config=custom_config)
+
+            target_text = element_description.lower().strip()
+            best_match_idx = -1
+
+            # 4. Iterate through all OCR results
+            for i, text_val in enumerate(data['text']):
+                conf = int(data['conf'][i])
+                text = text_val.lower().strip()
+
+                # Filter out low confidence or empty text
+                if conf > 30 and text:
+                    # Fuzzy match: Exact or substring match
+                    if target_text == text:
+                        best_match_idx = i
+                        break
+                    # Only allow substring matching if the matched part is somewhat significant (e.g., >3 chars)
+                    # to prevent tiny artifacts like "in" from matching "result_link"
+                    elif len(text) >= 4 and (target_text in text or text in target_text):
+                        best_match_idx = i
+                        break
+                    else:
+                        # Fallback: Word overlap matching. Useful if LLM asks for "Google Search results: Gemini AI"
+                        # but the screen just says "Gemini - Your AI assistant" or "Gemini AI".
+                        target_words = set([w for w in target_text.split() if len(w) > 3])
+                        screen_words = set([w for w in text.split() if len(w) > 3])
+                        if target_words and screen_words:
+                            overlap = len(target_words.intersection(screen_words))
+                            if overlap >= 2 or (len(target_words) == 1 and overlap == 1):
+                                best_match_idx = i
+                                break
+
+            if best_match_idx != -1:
+                x = data['left'][best_match_idx]
+                y = data['top'][best_match_idx]
+                w = data['width'][best_match_idx]
+                h = data['height'][best_match_idx]
+
+                # Calculate center coordinates for clicking
+                center_x = x + (w // 2)
+                center_y = y + (h // 2)
+
+                # Adjust for monitor offsets if necessary
+                center_x += monitor['left']
+                center_y += monitor['top']
+
+                logger.info(
+                    "OCR Found '%s' matching '%s' at (%s, %s)",
+                    data['text'][best_match_idx], element_description, center_x, center_y)
+                return (center_x, center_y)
+
+            return None
+
+        except (FileNotFoundError, ValueError, cv2.error) as e:
+            logger.error("OCR Parsing failed: %s", e)
+            logger.debug("Did you install Tesseract-OCR on your system?")
+            return None
+
+    def extract_all_text(self, image_path: Optional[str] = None) -> str:
+        """
+        Extracts all visible text from the screen or a specific image.
+        Uses psm 3 (Fully automatic page segmentation) which is better for
+        reading blocks of text/sentences than psm 11.
+        """
+        try:
+            if image_path:
+                img = cv2.imread(image_path)
+                if img is None:
+                    logger.error("Failed to read image at %s", image_path)
+                    return ""
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                with mss.mss() as sct:
+                    monitor = sct.monitors[1]
+                    screenshot = sct.grab(monitor)
+                img = np.array(screenshot)
+                gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+
+            # Pre-processing
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+            # psm 3: Fully automatic page segmentation, but no OSD.
+            # Good for extracting continuous sentences.
+            custom_config = r'--oem 3 --psm 3'
+            data = pytesseract.image_to_data(
+                thresh, output_type=pytesseract.Output.DICT, config=custom_config)
+
+            # Reconstruct lines of text to preserve phrases
+            lines = {}
+            for i, text in enumerate(data['text']):
+                conf = int(data['conf'][i])
+                text = text.strip()
+                if conf > 30 and text:
+                    block_num = data['block_num'][i]
+                    line_num = data['line_num'][i]
+                    key = f"{block_num}_{line_num}"
+                    if key not in lines:
+                        lines[key] = []
+                    lines[key].append(text)
+
+            # Join words in each line, then join lines
+            extracted_text = " ".join([" ".join(words) for words in lines.values()])
+            return extracted_text
+
+        except (FileNotFoundError, ValueError, cv2.error) as e:
+            logger.error("Failed to extract text: %s", e)
+            return ""
+
+
+========================================
+FILE: ./vision/verifier.py
+========================================
+
+"""
+Vision verification module for evaluating screen states using a vision-language model.
+"""
+import json
+import re
+
+from core.logger import setup_logger
+from core.config import config
+from vision.screen_capture import ScreenCapture
+
+logger = setup_logger("VisionVerifier")
+
+
+class VisionVerifier:  # pylint: disable=too-few-public-methods
+    """
+    Uses a vision-language model to determine if a goal was achieved
+    on the current screen.
+    """
+    def __init__(self, llm, model_name: str = "llava", ui_parser=None) -> None:
+        self.llm = llm
+        self.model_name = model_name
+        self.screen_cap = ScreenCapture()
+        self.ui_parser = ui_parser
+
+    def _fast_ocr_verify(self, image_path: str, expected_outcome: str, target_text: str, action: str) -> tuple[bool, str]:
+        """
+        Fast-path verification using OCR instead of the slow VLM.
+        """
+        if not self.ui_parser:
+            return False, ""
+
+        extracted_text = self.ui_parser.extract_all_text(image_path).lower()
+        if not extracted_text:
+            return False, ""
+
+        # 1. For 'type' actions, the typed text should be visible on screen
+        if action == "type" and len(target_text) > 2:
+            if target_text.lower() in extracted_text:
+                logger.info("OCR Fast-Path: Found typed text '%s' on screen.", target_text)
+                return True, f"OCR verified typed text: '{target_text}' is visible on screen."
+
+        # 2. Look for any quoted strings in the expected outcome
+        quotes = re.findall(r"'([^']*)'", expected_outcome) + re.findall(r'"([^"]*)"', expected_outcome)
+        for q in quotes:
+            if len(q) > 2 and q.lower() in extracted_text:
+                logger.info("OCR Fast-Path: Found expected quote '%s' on screen.", q)
+                return True, f"OCR verified expected text: '{q}' is visible on screen."
+
+        return False, "OCR check inconclusive."
+
+    async def verify(self, expected_outcome: str, target_text: str = "", action: str = "") -> tuple[bool, str]:
+        """
+        Takes a screenshot and asks the model if the outcome was achieved.
+        """
+        logger.info("Capturing screen to verify: '%s'...", expected_outcome)
+        screenshot_path = self.screen_cap.capture_fullscreen(
+            "current_state.png")
+
+        # FAST PATH: Instant OCR Verification
+        ocr_success, ocr_msg = self._fast_ocr_verify(screenshot_path, expected_outcome, target_text, action)
+        if ocr_success:
+            return True, ocr_msg
+
+
+        prompt = (
+            f"Look at this screenshot. Is the current state of the screen consistent with this goal: '{expected_outcome}'?\n"
+            "CRITICAL RULES:\n"
+            "1. Be extremely lenient. If the screen shows the desired end-state (e.g. the correct page is loaded), output success: true. Do NOT fail it just because the action to get there is already finished.\n"
+            "2. Do NOT be pedantic about how the goal was achieved. If the user asked to 'open Brave' and you see a browser open, that's success.\n"
+            "You must reply with a valid JSON object exactly like this: "
+            "{{\"success\": true, \"reason\": \"your reason here\"}}"
+        )
+
+        try:
+            logger.debug("Asking %s to verify...", self.model_name)
+            # Images are passed in the message dict for ollama compatibility
+            answer = await self.llm.chat(
+                model=self.model_name,
+                messages=[{
+                    'role': 'user',
+                    'content': prompt,
+                    'images': [screenshot_path]
+                }],
+                format='json',
+                options={'temperature': 0.0}
+            )
+
+            # Clean up markdown code blocks if present
+            clean_answer = answer.replace(
+                "```json", "").replace(
+                "```", "").strip()
+
+            try:
+                # Try to parse the cleaned string directly
+                result = json.loads(clean_answer)
+                is_success = result.get('success', False)
+                reason = result.get('reason', 'No reason provided')
+                logger.info(
+                    "Verifier response: %s (Success: %s)", reason, is_success)
+                return is_success, reason
+            except json.JSONDecodeError:
+                # Fallback: Extract via regex if JSON is malformed
+                success_match = re.search(
+                    r'"success"\s*:\s*(true|false)', answer, re.IGNORECASE)
+                reason_match = re.search(
+                    r'"reason"\s*:\s*"([^"]+)"', answer, re.IGNORECASE)
+
+                if success_match:
+                    is_success = success_match.group(1).lower() == 'true'
+                    reason = reason_match.group(
+                        1) if reason_match else 'Failed to parse reason.'
+                    logger.warning(
+                        "Verifier response (Regex Fallback): %s (Success: %s)",
+                        reason, is_success)
+                    return is_success, reason
+
+            # Ultimate Fallback
+            logger.error("Verifier returned invalid format: %s", answer)
+            return False, f"Invalid vision format: {answer}"
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Vision Verification Error: %s", e)
+            return False, f"Vision Error: {e}"
+
+    async def ask(self, question: str) -> str:
+        """
+        Takes a screenshot and asks the vision model an arbitrary question.
+        """
+        logger.info("Capturing screen to answer question...")
+        screenshot_path = self.screen_cap.capture_fullscreen("question_state.png")
+
+        prompt = (
+            f"You are an AI assistant looking at the user's screen. "
+            f"Answer the following question about what you see: {question}"
+        )
+        
+        try:
+            # We assume OllamaClient handles passing images to vision models.
+            # In our current setup, images are passed in the 'images' key of the message.
+            messages = [{
+                'role': 'user', 
+                'content': prompt, 
+                'images': [screenshot_path]
+            }]
+            
+            content = await self.llm.chat(
+                model=self.model_name,
+                messages=messages,
+                options={'temperature': 0.0}
+            )
+            return content.strip()
+        except Exception as e:
+            logger.error("Vision Question Error: %s", e)
+            return f"I ran into an error trying to see the screen: {e}"

@@ -1,0 +1,14 @@
+name: "Research Agent"
+model: "qwen2.5-coder:14b"
+triggers:
+  - "research"
+  - "find information about"
+  - "look up"
+  - "investigate"
+system_prompt: |
+  You are a research assistant. When given a topic,
+  you break it down into search queries and compile findings
+  into a structured summary. Be thorough and cite your sources.
+tools:
+  - browser
+  - screenshot

@@ -1,0 +1,10 @@
+{
+    "skill_id": "now_of_apps_are_there_in_dock_even_if_theya_re_ope",
+    "trigger_phrases": [
+        "now of apps are there in dock even if theya re open or closed i need the name of all of them"
+    ],
+    "plan_json": "[\n    {\n        \"task\": \"Open the Terminal application natively\",\n        \"parallel\": false\n    },\n    {\n        \"task\": \"Run a terminal command to query the Dock for all application names\",\n        \"parallel\": false,\n        \"delegate_to\": \"Research Agent\"\n    }\n]",
+    "success_count": 1,
+    "fail_count": 0,
+    "last_used": "2026-06-19T20:38:11.552443"
+}

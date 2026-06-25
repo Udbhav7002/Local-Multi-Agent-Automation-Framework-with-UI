@@ -1,0 +1,6 @@
+{
+    "manager_model": "qwen2.5-coder:14b",
+    "worker_model": "qwen2.5-coder:14b",
+    "vision_model": "qwen2.5vl:7b",
+    "num_ctx": 8192
+}

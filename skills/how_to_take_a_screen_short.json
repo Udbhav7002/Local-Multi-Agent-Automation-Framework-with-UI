@@ -1,0 +1,10 @@
+{
+    "skill_id": "how_to_take_a_screen_short",
+    "trigger_phrases": [
+        "how to take a screen short"
+    ],
+    "plan_json": "[\n    {\"task\": \"Take a screenshot using the default macOS shortcut\", \"parallel\": false}\n]",
+    "success_count": 1,
+    "fail_count": 0,
+    "last_used": "2026-06-20T12:50:32.189689"
+}

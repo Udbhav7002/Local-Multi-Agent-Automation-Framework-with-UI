@@ -1,0 +1,10 @@
+{
+    "skill_id": "open_brave_in_my_pc_and_go_to_gemini_google_ai_and",
+    "trigger_phrases": [
+        "open brave in my pc and go to gemini google ai and them search about rats"
+    ],
+    "plan_json": "[\n    {\"task\": \"Open the Brave browser\", \"parallel\": false},\n    {\"task\": \"Search for 'Gemini AI' in Brave\", \"parallel\": false},\n    {\"task\": \"Navigate to the official Google Gemini AI website from search results\", \"parallel\": false},\n    {\"task\": \"Search about rats in the Gemini AI chat interface\", \"parallel\": false}\n]",
+    "success_count": 1,
+    "fail_count": 0,
+    "last_used": "2026-06-19T19:12:09.691138"
+}
