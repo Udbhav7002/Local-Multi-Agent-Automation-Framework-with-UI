@@ -64,7 +64,7 @@ class SafetyGate:
         logger.info(f"Scanning command with Intelligent Security Gate: {command}")
         if self.llm and self.prompt_loader:
             try:
-                system_prompt = self.prompt_loader.load_prompt("safety", key="safety_prompt")
+                system_prompt = self.prompt_loader.load("safety", key="safety_prompt")
                 content = await self.llm.chat(
                     model=self.model_name,
                     messages=[

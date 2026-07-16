@@ -1,6 +1,6 @@
 import os
 import string
-from typing import Optional
+from typing import Optional, Any, Dict
 
 import yaml
 
@@ -18,9 +18,9 @@ class PromptLoader:
 
     def __init__(self, prompts_dir: str = _PROMPTS_DIR) -> None:
         self._dir = prompts_dir
-        self._cache: dict[str, dict] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
 
-    def _load_file(self, agent_name: str) -> dict:
+    def _load_file(self, agent_name: str) -> Dict[str, Any]:
         if agent_name in self._cache:
             return self._cache[agent_name]
         path = os.path.join(self._dir, f"{agent_name}.yaml")
@@ -28,6 +28,8 @@ class PromptLoader:
             raise FileNotFoundError(f"Prompt file not found: {path}")
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                data = {}
         self._cache[agent_name] = data
         return data
 
@@ -49,10 +51,10 @@ class PromptLoader:
         # Use jinja2.Template for advanced rendering
         import jinja2
         try:
-            return jinja2.Template(template).render(**kwargs)
+            return jinja2.Template(template).render(**kwargs)  # type: ignore[no-any-return]
         except Exception as e:
             logger.warning("Failed to render Jinja2 template for %s/%s: %s", agent_name, key, e)
-            return template
+            return template  # type: ignore[no-any-return]
 
     def reload(self) -> None:
         """Clear the cache to force reloading from disk."""

@@ -3,21 +3,22 @@ Router module for evaluating the intent of a user prompt.
 Determines whether the user is asking a question or issuing a task command.
 """
 import json
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 from core.logger import setup_logger
 from core.config import config
 from core.prompt_loader import PromptLoader
 from core.base_agent import BaseAgent
+from core.protocols import IntentRouter
 
 logger = setup_logger("Router")
 
 
-class Router(BaseAgent):  # pylint: disable=too-few-public-methods
+class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
     """
     Agent that routes user requests to either the QA LLM or the Planner.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus=None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[Any] = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 

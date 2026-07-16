@@ -63,6 +63,17 @@ class OllamaClient:
         from ollama import AsyncClient
         self._client = AsyncClient()
 
+    async def close(self) -> None:
+        """Close the underlying aiohttp/httpx ClientSession to free resources."""
+        if hasattr(self._client, 'close'):
+            await self._client.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
     async def chat(
         self,
         model: str,
@@ -93,9 +104,7 @@ class OllamaClient:
         # Await the async client natively (no threads needed!)
         response = await self._client.chat(**kwargs)
         content = response.get("message", {}).get("content", "").strip()
-
-        logger.debug("LLM response: %d chars", len(content))
-        return content
+        return str(content)
 
 
 class FakeLLMClient:

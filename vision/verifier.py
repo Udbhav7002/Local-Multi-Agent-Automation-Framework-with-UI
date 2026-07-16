@@ -148,7 +148,7 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
                 messages=messages,
                 options={'temperature': 0.0}
             )
-            return content.strip()
+            return str(content.strip())
         except Exception as e:
             logger.error("Vision Question Error: %s", e)
             return f"I ran into an error trying to see the screen: {e}"

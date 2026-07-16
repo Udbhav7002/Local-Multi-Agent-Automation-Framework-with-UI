@@ -3,23 +3,22 @@ Worker module for handling specialized sub-tasks assigned by the Manager (Planne
 """
 from core.config import config
 from core.logger import setup_logger
-from core.config import config
-from core.logger import setup_logger
 from core.response_parser import ResponseParser
 from core.protocols import TaskWorker
 from core.events import SystemEvent, EventBus
 from core.prompt_loader import PromptLoader
 from core.base_agent import BaseAgent
+from typing import Optional
 
 logger = setup_logger("Worker")
 
 
-class Worker(BaseAgent):
+class Worker(BaseAgent, TaskWorker):
     """
     Executes a specific sub-task given by the Manager.
     Outputs low-level CLI, GUI, or Browser commands in JSON.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus = None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[EventBus] = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 

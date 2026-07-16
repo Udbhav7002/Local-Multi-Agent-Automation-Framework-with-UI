@@ -49,8 +49,7 @@ class StepRunner:
         """
         # Use a deque as a sliding window to prevent context blowout
         action_history: deque = deque(maxlen=20)
-        history_chars = 0
-        steps_executed = []
+        steps_executed: list[dict] = []
 
         for i, sub_task in enumerate(steps):
             logger.info(
@@ -82,7 +81,7 @@ class StepRunner:
                 )
                 
                 steps_executed.append({
-                    "action": step.action.value,
+                    "action": step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
                     "target": step.target,
                     "success": step_success,
                     "duration_ms": duration_ms
@@ -118,11 +117,13 @@ class StepRunner:
                 logger.info(
                     "Worker Step %s.%s: [cyan]%s[/cyan] %s (Method: %s)",
                     task_idx + 1, step_idx + 1,
-                    step.action.value, step.target, step.method.value
+                    step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                    step.target,
+                    step.method.value if hasattr(step.method, 'value') else step.method  # type: ignore[attr-defined]
                 )
 
             # Safety gate for dangerous CLI commands
-            if step.method.value == "cli" and not self.safety_gate.is_safe(step.target):
+            if (step.method.value if hasattr(step.method, 'value') else step.method) == "cli" and not self.safety_gate.is_safe(step.target):  # type: ignore[attr-defined]
                 approved = await self.safety_gate.request_approval(step.target)
                 if not approved:
                     logger.warning("Action canceled by user. Aborting task.")
@@ -134,8 +135,8 @@ class StepRunner:
 
             # Record in sliding-window history
             entry = (
-                f"Action: {step.action.value} | Target: {step.target} | "
-                f"Method: {step.method.value} | Success: {success} | "
+                f"Action: {step.action.value if hasattr(step.action, 'value') else step.action} | Target: {step.target} | "  # type: ignore[attr-defined]
+                f"Method: {step.method.value if hasattr(step.method, 'value') else step.method} | Success: {success} | "  # type: ignore[attr-defined]
                 f"Output: {output[:200]}"
             )
             action_history.append(entry)
@@ -158,7 +159,7 @@ class StepRunner:
                             self.undo_stack.append(step)
                         if self.event_bus:
                             self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=step.action.value,
+                                step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
                                 step_target=step.target,
                                 success=True,
                                 message=f"Step succeeded (vision ok): {output}"
@@ -167,7 +168,7 @@ class StepRunner:
                     if v_feedback:
                         if self.event_bus:
                             self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=step.action.value,
+                                step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
                                 step_target=step.target,
                                 success=False,
                                 message=f"Step failed vision: {v_feedback}"
@@ -182,7 +183,7 @@ class StepRunner:
                 
                 if self.event_bus:
                     self.event_bus.publish("step_executed", StepExecutedEvent(
-                        step_action=step.action.value,
+                        step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
                         step_target=step.target,
                         success=True,
                         message=f"Step succeeded: {output}"
@@ -198,7 +199,7 @@ class StepRunner:
             
             if self.event_bus:
                 self.event_bus.publish("step_executed", StepExecutedEvent(
-                    step_action=step.action.value,
+                    step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
                     step_target=step.target,
                     success=False,
                     message=f"Step failed: {output}"
@@ -232,7 +233,7 @@ class StepRunner:
 
             feedback = (
                 f"\n\n[SYSTEM FEEDBACK]: Worker Step {task_idx + 1}.{step_idx + 1} "
-                f"(`{step.action.value}` `{step.target}`) failed with error: {output}.\n"
+                f"(`{step.action.value if hasattr(step.action, 'value') else step.action}` `{step.target}`) failed with error: {output}.\n"  # type: ignore[attr-defined]
                 f"[CURRENT STATE]:\n"
                 f"- Active App: {active_app}\n"
                 f"- Visible Text: {visible_text}\n"
@@ -268,7 +269,8 @@ class StepRunner:
         Empty feedback with success=False means "retry the step".
         """
         # Use dynamic wait time based on the action type
-        wait = self.WAIT_TIMES.get(step.action.value, 4)
+        action_val = step.action.value if hasattr(step.action, 'value') else step.action
+        wait = self.WAIT_TIMES.get(action_val, 4)  # type: ignore[attr-defined]
         if wait > 0:
             logger.info("Waiting for UI to render before taking screenshot (%ds)...", wait)
             await asyncio.sleep(wait)
@@ -276,7 +278,7 @@ class StepRunner:
         v_success, v_msg = await self.verifier.verify(
             expected_outcome=step.expected_outcome,
             target_text=step.target,
-            action=step.action.value
+            action=action_val  # type: ignore[attr-defined]
         )
 
         if v_success:
@@ -316,7 +318,9 @@ class StepRunner:
             if not step.undo_action or not step.undo_target:
                 continue
             
-            logger.info("Reversing action: %s %s -> %s %s", step.action.value, step.target, step.undo_action.value, step.undo_target)
+            action_val = step.action.value if hasattr(step.action, 'value') else step.action
+            undo_action_val = step.undo_action.value if hasattr(step.undo_action, 'value') else step.undo_action
+            logger.info("Reversing action: %s %s -> %s %s", action_val, step.target, undo_action_val, step.undo_target)
             
             # Create a reverse step
             reverse_step = ActionStep(

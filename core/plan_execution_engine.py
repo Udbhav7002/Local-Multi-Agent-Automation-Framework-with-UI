@@ -116,16 +116,20 @@ class PlanExecutionEngine:
 
             if delegated_steps and self.custom_agent_runner and self.agent_loader:
                 logger.info("[bold magenta]Delegating %d tasks to custom agents...[/bold magenta]", len(delegated_steps))
+
+                agent_loader = self.agent_loader
+                custom_agent_runner = self.custom_agent_runner
+                step_runner = self.step_runner
                 
                 async def _delegate(step):
                     agent_name = step["delegate_to"]
-                    agent = self.agent_loader.agents.get(agent_name)
+                    agent = agent_loader.agents.get(agent_name)
                     if agent:
-                        await self.custom_agent_runner.run_custom_agent(step["task"], agent)
+                        await custom_agent_runner.run_custom_agent(step["task"], agent)
                     else:
                         logger.warning("Delegated agent '%s' not found.", agent_name)
-                        await self.step_runner.run([step["task"]])
-                        
+                        await step_runner.run([step["task"]])
+
                 await asyncio.gather(*(_delegate(s) for s in delegated_steps))
 
             if normal_tasks:

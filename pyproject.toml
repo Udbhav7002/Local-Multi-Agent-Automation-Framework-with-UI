@@ -11,14 +11,26 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi",
     "uvicorn",
-    "chromadb",
+    "chromadb>=0.4.22",
     "rich",
     "pyyaml",
-    "playwright",
+    "playwright>=1.40.0",
     "aiohttp",
-    "pydantic"
+    "pydantic",
+    "ollama>=0.1.6",
+    "mss>=9.0.1",
+    "pyautogui>=0.9.54",
+    "pynput>=1.7.6",
+    "Pillow>=10.2.0",
+    "pytesseract>=0.3.10",
+    "opencv-python>=4.8.0",
+    "psutil",
+    "SpeechRecognition>=3.10.0",
+    "websockets",
+    "jinja2",
 ]
 
+# Platform-specific dependencies
 [project.optional-dependencies]
 dev = [
     "pytest",
@@ -27,6 +39,25 @@ dev = [
     "black",
     "mypy"
 ]
+macos = [
+    "pyobjc-core<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreText<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa<12.0; sys_platform == 'darwin'",
+    "pyobjc<12.0; sys_platform == 'darwin'",
+    "textual>=0.40.0; sys_platform == 'darwin'",
+]
+windows = [
+    "textual>=0.40.0; sys_platform == 'win32'",
+]
+linux = [
+    "textual>=0.40.0; sys_platform == 'linux'",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "memory*", "vision*", "agents*", "plugins*", "tools*", "skills*", "tests*"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

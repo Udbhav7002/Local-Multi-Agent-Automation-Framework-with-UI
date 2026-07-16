@@ -5,6 +5,7 @@ import logging
 import speech_recognition as sr
 from rich import print
 
+
 logger = logging.getLogger("Voice")
 
 class VoiceInput:
@@ -29,13 +30,13 @@ class VoiceInput:
             try:
                 # Try local whisper first
                 # requires: pip install openai-whisper
-                text = self.recognizer.recognize_whisper(audio, model="base.en").strip()
+                text = str(self.recognizer.recognize_whisper(audio, model="base.en").strip())  # type: ignore[attr-defined]
                 logger.debug("Transcribed via Whisper: %s", text)
                 return text
             except Exception as e:
                 logger.debug("Whisper failed or not installed (%s). Falling back to Google SR.", e)
                 # Fallback to Google SR
-                text = self.recognizer.recognize_google(audio).strip()
+                text = str(self.recognizer.recognize_google(audio).strip())  # type: ignore[attr-defined]
                 logger.debug("Transcribed via Google: %s", text)
                 return text
 

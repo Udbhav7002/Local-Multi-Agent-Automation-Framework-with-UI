@@ -78,9 +78,10 @@ class ActionStep:
 
         # Parse action, supporting custom plugin actions
         try:
-            action = ActionType(raw_action)
+            action_enum = ActionType(raw_action)
+            action: Union[ActionType, str] = action_enum
             # Force the canonical method based on the action (override LLM mistakes)
-            method = ACTION_TO_METHOD.get(action, MethodType.CLI)
+            method: Union[MethodType, str] = ACTION_TO_METHOD.get(action_enum, MethodType.CLI)
         except ValueError:
             # Custom plugin action
             action = raw_action

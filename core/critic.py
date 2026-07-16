@@ -3,7 +3,7 @@ Critic module for evaluating proposed execution plans.
 Ensures safety, logic, and adherence to rules before execution.
 """
 import json
-from typing import Tuple
+from typing import Tuple, Optional
 from core.protocols import TaskCritic
 from core.events import SystemEvent, EventBus
 from core.logger import setup_logger
@@ -16,7 +16,7 @@ class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
     """
     Agent that verifies plans before execution for safety, efficiency, and correctness.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus = None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[EventBus] = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 

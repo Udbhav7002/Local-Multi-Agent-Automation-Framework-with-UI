@@ -137,8 +137,12 @@ class ExecutorDispatcher:
             # Check action-based plugins first
             plugin = self._action_plugins.get(action)
             
-            # Fallback to standard method strategy
-            strategy = self._strategies.get(method)
+            # Fallback to standard method strategy - convert method string to MethodType enum
+            try:
+                method_enum = MethodType(method) if isinstance(method, str) else method
+            except ValueError:
+                method_enum = MethodType.CLI  # fallback
+            strategy = self._strategies.get(method_enum)
             
             if plugin is None and strategy is None:
                 error_msg = f"Unknown execution method: {method}"
@@ -151,6 +155,7 @@ class ExecutorDispatcher:
             try:
                 if plugin is not None:
                     return await asyncio.wait_for(plugin.execute(action, target), timeout=timeout)
+                assert strategy is not None, "Strategy should not be None here"
                 return await asyncio.wait_for(strategy.execute(action, target), timeout=timeout)
             except asyncio.TimeoutError:
                 error_msg = f"Action '{action}' timed out after {timeout} seconds."

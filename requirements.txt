@@ -1,23 +1,43 @@
-pyobjc-core<12.0
-pyobjc-framework-Quartz<12.0
-pyobjc-framework-ApplicationServices<12.0
-pyobjc-framework-CoreText<12.0
-pyobjc-framework-Cocoa<12.0
-pyobjc<12.0
-textual>=0.40.0
-ollama>=0.1.6
-chromadb>=0.4.22
-mss>=9.0.1
-pyautogui>=0.9.54
-pynput>=1.7.6
-playwright>=1.40.0
-Pillow>=10.2.0
-pytesseract>=0.3.10
-opencv-python>=4.8.0
-psutil
-SpeechRecognition>=3.10.0
-pyaudio>=0.2.14
+# Core dependencies
 fastapi
 uvicorn
 websockets
 pyyaml
+jinja2
+
+# LLM client
+ollama>=0.1.6
+
+# Memory
+chromadb>=0.4.22
+
+# Vision & Screen capture
+mss>=9.0.1
+Pillow>=10.2.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+
+# GUI Automation
+pyautogui>=0.9.54
+pynput>=1.7.6
+
+# Browser automation
+playwright>=1.40.0
+
+# System
+psutil
+
+# Voice
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.14
+
+# Text UI
+textual>=0.40.0
+
+# macOS only - PyObjC for dock icon hiding and accessibility
+pyobjc-core<12.0; sys_platform == "darwin"
+pyobjc-framework-Quartz<12.0; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices<12.0; sys_platform == "darwin"
+pyobjc-framework-CoreText<12.0; sys_platform == "darwin"
+pyobjc-framework-Cocoa<12.0; sys_platform == "darwin"
+pyobjc<12.0; sys_platform == "darwin"

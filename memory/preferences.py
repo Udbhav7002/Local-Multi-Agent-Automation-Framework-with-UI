@@ -5,6 +5,7 @@ import asyncio
 import os
 import json
 from datetime import datetime
+from typing import Dict, Any
 
 from core.logger import setup_logger
 
@@ -16,7 +17,7 @@ _PREFS_FILE = os.path.join(_PROJECT_ROOT, "user_preferences.json")
 class UserPreferences:
     """Tracks and saves user preferences and app usage habits."""
     def __init__(self) -> None:
-        self.prefs = {
+        self.prefs: Dict[str, Any] = {
             "apps_used": {},
             "last_updated": ""
         }
@@ -53,8 +54,9 @@ class UserPreferences:
         if "apps_used" not in self.prefs:
             self.prefs["apps_used"] = {}
             
-        count = self.prefs["apps_used"].get(app_name, 0)
-        self.prefs["apps_used"][app_name] = count + 1
+        apps_used: Dict[str, int] = self.prefs["apps_used"]  # type: ignore[assignment]
+        count = apps_used.get(app_name, 0)
+        apps_used[app_name] = count + 1
         await self.save()
 
     def get_context_string(self) -> str:

@@ -67,19 +67,45 @@ class Orchestrator:
             event_bus=self.event_bus
         )
 
+    async def shutdown(self) -> None:
+        """Gracefully shut down all resources."""
+        # Close LLM client (if it has a close method)
+        for agent in (self.router, self.planner, self.critic, self.worker):
+            if hasattr(agent, 'llm') and hasattr(agent.llm, 'close'):
+                try:
+                    await agent.llm.close()
+                except Exception as e:
+                    logger.warning("Failed to close LLM client: %s", e)
+        
+        # Close step runner executor
+        if hasattr(self.step_runner, 'executor') and hasattr(self.step_runner.executor, 'shutdown'):
+            try:
+                await self.step_runner.executor.shutdown()
+            except Exception as e:
+                logger.warning("Failed to close executor: %s", e)
+        
+        # Close memory store
+        if hasattr(self.memory, 'close'):
+            try:
+                self.memory.close()
+            except Exception as e:
+                logger.warning("Failed to close memory: %s", e)
+        
+        logger.info("Orchestrator shutdown complete")
+
     async def process_prompt(self, user_text: str) -> None:
         """Main entry point for processing user input."""
         if not getattr(self, "_prefs_loaded", False):
             await self.preferences.load()
             self._prefs_loaded = True
-            
+             
         logger.info("Processing user input: '%s'", user_text)
 
         # 1. Fast paths: Memory Cache
         cached_plan = self.memory.get_plan(user_text)
         if cached_plan:
             logger.info("[bold green]Found successful plan in memory! Bypassing planner...[/bold green]")
-            await self.engine.execute_cached_plan(user_text, cached_plan, self._conversation_history)
+            await self.engine.execute_cached_plan(user_text, cached_plan, list(self._conversation_history))
             return
 
         # 1.5. Fast paths: Skill Library
@@ -87,7 +113,7 @@ class Orchestrator:
             skill_plan = self.skill_library.get_skill_plan(user_text)
             if skill_plan:
                 logger.info("[bold green]Found matching skill in library! Bypassing planner...[/bold green]")
-                await self.engine.execute_cached_plan(user_text, skill_plan, self._conversation_history)
+                await self.engine.execute_cached_plan(user_text, skill_plan, list(self._conversation_history))
                 return
 
         # 2. Routing
@@ -123,8 +149,8 @@ class Orchestrator:
                 else:
                     self._conversation_history.append({"prompt": user_text, "outcome": f"Failed (agent: {matched_agent.name})."})
                     logger.info("Falling back to default planning pipeline...")
-                    await self.engine.plan_and_execute(user_text, self._conversation_history)
+                    await self.engine.plan_and_execute(user_text, list(self._conversation_history))
                 return
 
         # 3. Execution
-        await self.engine.plan_and_execute(user_text, self._conversation_history)
+        await self.engine.plan_and_execute(user_text, list(self._conversation_history))

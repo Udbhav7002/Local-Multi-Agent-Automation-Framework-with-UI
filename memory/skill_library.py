@@ -5,7 +5,7 @@ import os
 import json
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 from core.logger import setup_logger
 
@@ -13,6 +13,9 @@ logger = setup_logger("SkillLibrary")
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SKILLS_DIR = os.path.join(_PROJECT_ROOT, "skills")
+
+SkillDict = Dict[str, Any]
+
 
 class SkillLibrary:
     """Manages reusable skills generated from past successful plans."""
@@ -34,7 +37,7 @@ class SkillLibrary:
         file_path = os.path.join(_SKILLS_DIR, f"{safe_name}.json")
         
         # Base skill structure
-        skill = {
+        skill: SkillDict = {
             "skill_id": safe_name,
             "trigger_phrases": [task_description.lower()],
             "plan_json": plan_json,
@@ -47,7 +50,7 @@ class SkillLibrary:
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
+                    existing: SkillDict = json.load(f)
                     skill.update(existing)
                     
                 # Update plan in case the new one is better/different
@@ -55,12 +58,13 @@ class SkillLibrary:
                     
                 # Add trigger phrase if new
                 task_lower = task_description.lower()
-                if task_lower not in skill["trigger_phrases"]:
-                    skill["trigger_phrases"].append(task_lower)
+                trigger_phrases: List[str] = skill.get("trigger_phrases", [])  # type: ignore[assignment]
+                if task_lower not in trigger_phrases:
+                    trigger_phrases.append(task_lower)
             except Exception as e:
                 logger.error("Failed to read existing skill %s: %s", file_path, e)
                 
-        skill["success_count"] += 1
+        skill["success_count"] = int(skill.get("success_count", 0)) + 1
         skill["last_used"] = datetime.now().isoformat()
         
         try:
@@ -78,8 +82,8 @@ class SkillLibrary:
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    skill = json.load(f)
-                skill["fail_count"] += 1
+                    skill: SkillDict = json.load(f)
+                skill["fail_count"] = int(skill.get("fail_count", 0)) + 1
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(skill, f, indent=4)
                 logger.debug("Marked skill '%s' as failed.", safe_name)
@@ -101,19 +105,20 @@ class SkillLibrary:
                 file_path = os.path.join(_SKILLS_DIR, fname)
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
-                        skill = json.load(f)
+                        skill: SkillDict = json.load(f)
                     
                     # Check if the task description matches any trigger
                     matched = False
-                    for trigger in skill.get("trigger_phrases", []):
+                    trigger_phrases: List[str] = skill.get("trigger_phrases", [])  # type: ignore[assignment]
+                    for trigger in trigger_phrases:
                         # Simple substring match (could be upgraded to embeddings later)
                         if trigger in task_lower or task_lower in trigger:
                             matched = True
                             break
                             
                     if matched:
-                        successes = skill.get("success_count", 0)
-                        fails = skill.get("fail_count", 0)
+                        successes = int(skill.get("success_count", 0))
+                        fails = int(skill.get("fail_count", 0))
                         total = successes + fails
                         rate = successes / total if total > 0 else 1.0
                         

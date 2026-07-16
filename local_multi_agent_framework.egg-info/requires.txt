@@ -1,0 +1,47 @@
+fastapi
+uvicorn
+chromadb>=0.4.22
+rich
+pyyaml
+playwright>=1.40.0
+aiohttp
+pydantic
+ollama>=0.1.6
+mss>=9.0.1
+pyautogui>=0.9.54
+pynput>=1.7.6
+Pillow>=10.2.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+psutil
+SpeechRecognition>=3.10.0
+websockets
+jinja2
+
+[dev]
+pytest
+pytest-asyncio
+flake8
+black
+mypy
+
+[linux]
+
+[linux:sys_platform == "linux"]
+textual>=0.40.0
+
+[macos]
+
+[macos:sys_platform == "darwin"]
+pyobjc-core<12.0
+pyobjc-framework-Quartz<12.0
+pyobjc-framework-ApplicationServices<12.0
+pyobjc-framework-CoreText<12.0
+pyobjc-framework-Cocoa<12.0
+pyobjc<12.0
+textual>=0.40.0
+
+[windows]
+
+[windows:sys_platform == "win32"]
+textual>=0.40.0

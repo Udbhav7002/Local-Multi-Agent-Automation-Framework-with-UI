@@ -46,7 +46,7 @@ class ChromaStore:
                 if distance < config.memory_success_threshold:
                     logger.debug(
                         "Found cached plan with distance: %s", distance)
-                    return results['documents'][0][0]
+                    return str(results['documents'][0][0])
             return None
         except (ValueError, OSError) as e:
             logger.error("Error querying success collection: %s", e)

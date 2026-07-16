@@ -64,7 +64,7 @@ class UIParser: # pylint: disable=too-few-public-methods
             try:
                 import vision_ext
                 logger.debug("Using C++ vision_ext for OCR...")
-                coords = vision_ext.find_element(img, element_description)
+                coords = vision_ext.find_element(img, element_description)  # type: ignore[attr-defined]
                 if coords:
                     center_x, center_y = coords
                     center_x += monitor['left']
@@ -179,7 +179,7 @@ class UIParser: # pylint: disable=too-few-public-methods
                 thresh, output_type=pytesseract.Output.DICT, config=custom_config)
 
             # Reconstruct lines of text to preserve phrases
-            lines = {}
+            lines: dict[str, list[str]] = {}
             for i, text in enumerate(data['text']):
                 conf = int(data['conf'][i])
                 text = text.strip()

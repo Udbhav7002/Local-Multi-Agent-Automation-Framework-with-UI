@@ -42,7 +42,9 @@ async def test_step_runner_executor_failure(fake_executor, fake_verifier):
         }
     ])
     worker = FakeWorker(mock_json)
-    runner = StepRunner(worker, fake_executor, fake_verifier, SafetyGate())
+    gate = SafetyGate()
+    gate.allowed_base_commands.add("fail_command")  # bypass safety gate
+    runner = StepRunner(worker, fake_executor, fake_verifier, gate)
 
     fake_executor.mock_success = False
     fake_executor.mock_output = "Command not found"

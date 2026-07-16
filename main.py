@@ -225,7 +225,9 @@ async def async_main(args: argparse.Namespace) -> None:
         await asyncio.wait([input_task, asyncio.create_task(shutdown_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     finally:
         console.print("\n  [#888888]Cleaning up resources...[/#888888]")
-        if hasattr(orchestrator.step_runner, "executor"):
+        if hasattr(orchestrator, "shutdown"):
+            await orchestrator.shutdown()
+        elif hasattr(orchestrator.step_runner, "executor"):
             await orchestrator.step_runner.executor.shutdown()
             
 def main() -> None:

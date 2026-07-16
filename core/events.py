@@ -36,6 +36,7 @@ class TaskCompletedEvent(SystemEvent):
     task_description: str = ""
     success: bool = False
     total_duration_s: float = 0.0
+
 class EventBus:
     """
     Central event bus for the framework.
