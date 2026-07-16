@@ -18,7 +18,7 @@
 Welcome to the **Local Multi-Agent Automation Framework**, an ultra-minimalist, high-performance terminal tool that leverages local AI agents to automate tasks directly on your Operating System. Built entirely around privacy and local execution, this framework requires no cloud API keys and operates fully on your own hardware using Ollama.
 
 <div align="center">
-  <img src="Screenshot 2026-07-01 at 12.39.34 AM.png" alt="Framework Screenshot" width="800"/>
+  <!-- Framework Screenshot removed -->
 </div>
 
 ## ✨ Key Features
@@ -34,7 +34,7 @@ Welcome to the **Local Multi-Agent Automation Framework**, an ultra-minimalist, 
 The system is built on a modular, event-driven architecture that allows seamless communication between specialized agents.
 
 <div align="center">
-  <img src="Workflow.png" alt="Workflow Architecture" width="800"/>
+  <!-- Workflow Architecture removed -->
 </div>
 
 ## 🚀 Getting Started
