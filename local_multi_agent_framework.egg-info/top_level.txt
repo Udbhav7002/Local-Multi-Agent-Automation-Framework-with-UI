@@ -1,9 +1,0 @@
-agents
-core
-memory
-plugins
-skills
-tests
-tools
-vision
-vision_ext

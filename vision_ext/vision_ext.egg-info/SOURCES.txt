@@ -1,8 +1,0 @@
-pyproject.toml
-setup.py
-vision_parser.cpp
-vision_ext.egg-info/PKG-INFO
-vision_ext.egg-info/SOURCES.txt
-vision_ext.egg-info/dependency_links.txt
-vision_ext.egg-info/not-zip-safe
-vision_ext.egg-info/top_level.txt
