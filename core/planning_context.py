@@ -40,17 +40,8 @@ class PlanningContext:
         """Append system feedback from a failed plan attempt."""
         self.system_feedback.append(feedback)
 
-    async def build_prompt(self) -> str:
-        """Render all context into a single prompt string for the Planner.
-        """
-        # Trigger summarization if we are nearing the budget
-        current_est = len(self.original_task) + len(str(self.past_failures)) + len(str(self.conversation_history))
-        for fb in self.system_feedback:
-            current_est += len(fb)
-            
-        if current_est > (self.max_prompt_chars * 0.8) and self.llm and self.model_name:
-            await self._summarize()
-
+    def _render_sections(self) -> list[str]:
+        """Render prompt sections from dataclass attributes."""
         sections: list[str] = [self.original_task]
 
         if self.user_preferences:
@@ -85,10 +76,24 @@ class PlanningContext:
                 )
             sections.append(failure_block)
 
-        # Feedback is appended last so it's trimmed first below.
+        # Feedback is appended last so it's trimmed in FIFO order.
         for fb in self.system_feedback:
             sections.append(fb)
 
+        return sections
+
+    async def build_prompt(self) -> str:
+        """Render all context into a single prompt string for the Planner.
+        """
+        # Trigger summarization if we are nearing the budget
+        current_est = len(self.original_task) + len(str(self.past_failures)) + len(str(self.conversation_history))
+        for fb in self.system_feedback:
+            current_est += len(fb)
+            
+        if current_est > (self.max_prompt_chars * 0.8) and self.llm and self.model_name:
+            await self._summarize()
+
+        sections = self._render_sections()
         return self._fit_to_budget_sync(sections)
 
     # ------------------------------------------------------------------
@@ -118,15 +123,45 @@ class PlanningContext:
         except Exception as e:
             logger.error(f"Context summarization failed: {e}")
 
-    def _fit_to_budget_sync(self, sections: list[str]) -> str:
-        """Drop the *oldest* trailing sections until under budget."""
-        prompt = "".join(sections)
-        if len(prompt) <= self.max_prompt_chars:
-            return prompt
+    def _fit_to_budget_sync(self, sections: list[str] = None) -> str:
+        """Truncate prompt sections in FIFO order to stay within max_prompt_chars.
 
-        # Drop feedback entries (last elements) one-by-one, oldest first.
-        # The first section (original_task) is never dropped.
-        while len(sections) > 1 and len("".join(sections)) > self.max_prompt_chars:
-            sections.pop()
+        Guarantees:
+        - original_task is ALWAYS preserved intact.
+        - Most recent error feedback (system_feedback[-1]) is ALWAYS preserved.
+        - Oldest conversation history and oldest system feedback entries are dropped first (FIFO).
+        """
+        is_direct_sections = sections is not None
+        if sections is None:
+            sections = self._render_sections()
+
+        if len("".join(sections)) <= self.max_prompt_chars:
+            return "".join(sections)
+
+        # 1. Drop oldest entries from conversation_history (FIFO order)
+        while self.conversation_history and len("".join(self._render_sections())) > self.max_prompt_chars:
+            self.conversation_history.pop(0)
+
+        # 2. Drop oldest entries from system_feedback (FIFO order), preserving system_feedback[-1]
+        while len(self.system_feedback) > 1 and len("".join(self._render_sections())) > self.max_prompt_chars:
+            self.system_feedback.pop(0)
+
+        # 3. Drop oldest entries from past_failures (FIFO order)
+        while self.past_failures and len("".join(self._render_sections())) > self.max_prompt_chars:
+            self.past_failures.pop(0)
+
+        # If context state was modified, re-render sections from state
+        if not is_direct_sections or (self.conversation_history or len(self.system_feedback) > 0 or self.past_failures):
+            rendered = self._render_sections()
+            if len("".join(rendered)) <= self.max_prompt_chars:
+                return "".join(rendered)
+            sections = rendered
+
+        # Fallback for direct sections list or if state truncation wasn't enough
+        # Drop from index 1 (oldest section after original_task), preserving sections[0] and sections[-1]
+        sections = list(sections)
+        while len(sections) > 2 and len("".join(sections)) > self.max_prompt_chars:
+            sections.pop(1)
 
         return "".join(sections)
+

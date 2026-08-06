@@ -7,6 +7,16 @@ import os
 
 from rich.logging import RichHandler
 from rich.console import Console
+import contextvars
+
+# Correlation ID for tracking individual task executions
+_task_id: contextvars.ContextVar[str] = contextvars.ContextVar('task_id', default='')
+
+def set_task_id(task_id: str) -> None:
+    _task_id.set(task_id)
+
+def get_task_id() -> str:
+    return _task_id.get()
 
 # Share a single global console for the entire app
 # Force terminal to False if in CI, otherwise auto-detect
@@ -45,6 +55,7 @@ def setup_logger(name: str) -> logging.Logger:
                     "name": record.name,
                     "level": record.levelname,
                     "message": record.getMessage(),
+                    "task_id": get_task_id(),
                 }
                 if record.exc_info:
                     log_record["exception"] = self.formatException(record.exc_info)

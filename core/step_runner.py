@@ -25,7 +25,14 @@ class StepRunner:
     """
     Executes a list of high-level sub-tasks by delegating to the Worker
     and Executor, with retry logic, vision verification, and safety gates.
+    
+    TODO: Decouple this class to avoid heavy reliance on hasattr/value checks.
     """
+
+    @staticmethod
+    def _enum_val(obj) -> str:
+        """Extract string value from enum or pass through string."""
+        return obj.value if hasattr(obj, 'value') else str(obj)
 
     def __init__(
         self,
@@ -41,6 +48,12 @@ class StepRunner:
         self.safety_gate = safety_gate or SafetyGate()
         self.event_bus = event_bus
         self.undo_stack: list[ActionStep] = []
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Signal that all in-flight steps should stop."""
+        self._cancelled = True
+        logger.info("[yellow]StepRunner received cancellation signal.[/yellow]")
 
     async def run(self, steps: list[str]) -> Tuple[bool, str, list[dict]]:
         """
@@ -52,6 +65,10 @@ class StepRunner:
         steps_executed: list[dict] = []
 
         for i, sub_task in enumerate(steps):
+            if self._cancelled:
+                logger.warning("Execution cancelled by user.")
+                return False, "Execution cancelled.", steps_executed
+
             logger.info(
                 "Manager delegating sub-task %s to Worker: '%s'",
                 i + 1, sub_task
@@ -81,7 +98,7 @@ class StepRunner:
                 )
                 
                 steps_executed.append({
-                    "action": step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                    "action": self._enum_val(step.action),
                     "target": step.target,
                     "success": step_success,
                     "duration_ms": duration_ms
@@ -105,6 +122,9 @@ class StepRunner:
         Executes a single ActionStep with retries and vision verification.
         Returns (success: bool, failure_feedback: str, duration_ms: int).
         """
+        if self._cancelled:
+            return False, "Execution cancelled.", 0
+
         import time
         for attempt in range(config.max_step_retries + 1):
             if attempt > 0:
@@ -117,13 +137,22 @@ class StepRunner:
                 logger.info(
                     "Worker Step %s.%s: [cyan]%s[/cyan] %s (Method: %s)",
                     task_idx + 1, step_idx + 1,
-                    step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                    self._enum_val(step.action),
                     step.target,
-                    step.method.value if hasattr(step.method, 'value') else step.method  # type: ignore[attr-defined]
+                    self._enum_val(step.method)
                 )
 
             # Safety gate for dangerous CLI commands
-            if (step.method.value if hasattr(step.method, 'value') else step.method) == "cli" and not self.safety_gate.is_safe(step.target):  # type: ignore[attr-defined]
+            if self._enum_val(step.method) == "cli" and not self.safety_gate.is_safe(step.target):
+                logger.warning("Dangerous CLI command blocked: %s", step.target)
+                return False, "Dangerous action blocked by safety gate.", 0
+
+            # General safety check
+            if not self.safety_gate.is_safe_action(
+                action=self._enum_val(step.action),
+                target=step.target,
+                method=self._enum_val(step.method)
+            ):
                 approved = await self.safety_gate.request_approval(step.target)
                 if not approved:
                     logger.warning("Action canceled by user. Aborting task.")
@@ -135,8 +164,8 @@ class StepRunner:
 
             # Record in sliding-window history
             entry = (
-                f"Action: {step.action.value if hasattr(step.action, 'value') else step.action} | Target: {step.target} | "  # type: ignore[attr-defined]
-                f"Method: {step.method.value if hasattr(step.method, 'value') else step.method} | Success: {success} | "  # type: ignore[attr-defined]
+                f"Action: {self._enum_val(step.action)} | Target: {step.target} | "
+                f"Method: {self._enum_val(step.method)} | Success: {success} | "
                 f"Output: {output[:200]}"
             )
             action_history.append(entry)
@@ -159,7 +188,7 @@ class StepRunner:
                             self.undo_stack.append(step)
                         if self.event_bus:
                             self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                                step_action=self._enum_val(step.action),
                                 step_target=step.target,
                                 success=True,
                                 message=f"Step succeeded (vision ok): {output}"
@@ -168,7 +197,7 @@ class StepRunner:
                     if v_feedback:
                         if self.event_bus:
                             self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                                step_action=self._enum_val(step.action),
                                 step_target=step.target,
                                 success=False,
                                 message=f"Step failed vision: {v_feedback}"
@@ -183,7 +212,7 @@ class StepRunner:
                 
                 if self.event_bus:
                     self.event_bus.publish("step_executed", StepExecutedEvent(
-                        step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                        step_action=self._enum_val(step.action),
                         step_target=step.target,
                         success=True,
                         message=f"Step succeeded: {output}"
@@ -199,27 +228,43 @@ class StepRunner:
             
             if self.event_bus:
                 self.event_bus.publish("step_executed", StepExecutedEvent(
-                    step_action=step.action.value if hasattr(step.action, 'value') else step.action,  # type: ignore[attr-defined]
+                    step_action=self._enum_val(step.action),
                     step_target=step.target,
                     success=False,
                     message=f"Step failed: {output}"
                 ))
 
-            if attempt < config.max_step_retries:
-                logger.info("Auto-restarting step...")
-                await asyncio.sleep(2)
-                continue
-
             active_app = "Unknown"
+            import platform
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    'osascript', '-e', 'tell application "System Events" to get name of first application process whose frontmost is true',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-                if proc.returncode == 0:
-                    active_app = stdout.decode().strip()
+                system = platform.system()
+                if system == "Darwin":
+                    proc = await asyncio.create_subprocess_exec(
+                        'osascript', '-e',
+                        'tell application "System Events" to get name of first application process whose frontmost is true',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                elif system == "Windows":
+                    proc = await asyncio.create_subprocess_exec(
+                        'powershell', '-Command',
+                        '(Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object -First 1).ProcessName',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                elif system == "Linux":
+                    proc = await asyncio.create_subprocess_exec(
+                        'xdotool', 'getactivewindow', 'getwindowpid',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                else:
+                    proc = None
+                    
+                if proc:
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                    if proc.returncode == 0:
+                        active_app = stdout.decode().strip()
             except asyncio.TimeoutError:
                 logger.debug("Active app check timed out.")
             except Exception as e:
@@ -231,9 +276,32 @@ class StepRunner:
                 if len(visible_text) > 1000:
                     visible_text = visible_text[:1000] + "..."
 
+            if attempt < config.max_step_retries:
+                logger.info("Step failed, attempting self-correction...")
+                prompt = (
+                    f"The previous action failed. Here is the error:\n"
+                    f"Action: {self._enum_val(step.action)} | Target: {step.target} | Method: {self._enum_val(step.method)}\n"
+                    f"Error: {output}\n\n"
+                    f"Current Screen State:\n"
+                    f"- Active App: {active_app}\n"
+                    f"- Visible Text: {visible_text}\n\n"
+                    f"Generate a corrected action step to achieve the same goal. Adjust the target or method based on the error."
+                )
+                try:
+                    correction_json = await self.worker.generate_action(prompt, "")
+                    corrected_steps = ResponseParser.parse_worker_output(correction_json)
+                    if corrected_steps:
+                        step = ActionStep.from_dict(corrected_steps[0])
+                        logger.info("Correction applied, retrying with new step: %s %s", self._enum_val(step.action), step.target)
+                except Exception as e:
+                    logger.error("Correction failed, falling back to original step: %s", e)
+                    
+                await asyncio.sleep(2)
+                continue
+
             feedback = (
                 f"\n\n[SYSTEM FEEDBACK]: Worker Step {task_idx + 1}.{step_idx + 1} "
-                f"(`{step.action.value if hasattr(step.action, 'value') else step.action}` `{step.target}`) failed with error: {output}.\n"  # type: ignore[attr-defined]
+                f"(`{self._enum_val(step.action)}` `{step.target}`) failed with error: {output}.\n"
                 f"[CURRENT STATE]:\n"
                 f"- Active App: {active_app}\n"
                 f"- Visible Text: {visible_text}\n"
@@ -269,7 +337,7 @@ class StepRunner:
         Empty feedback with success=False means "retry the step".
         """
         # Use dynamic wait time based on the action type
-        action_val = step.action.value if hasattr(step.action, 'value') else step.action
+        action_val = self._enum_val(step.action)
         wait = self.WAIT_TIMES.get(action_val, 4)  # type: ignore[attr-defined]
         if wait > 0:
             logger.info("Waiting for UI to render before taking screenshot (%ds)...", wait)
@@ -292,16 +360,21 @@ class StepRunner:
             await asyncio.sleep(2)
             return False, ""  # empty feedback = retry
 
-        # After all retries exhausted: auto-continue if the executor reported success
-        # The executor DID succeed (we only call _verify_with_vision after success),
-        # so the vision model is likely being overly strict. Continue with a warning.
-        logger.warning(
-            "[yellow]Vision uncertain after %d attempts, but executor reported success. "
-            "Auto-continuing...[/yellow]", attempt + 1
-        )
-        if step.undo_action and step.undo_target:
-            self.undo_stack.append(step)
-        return True, ""
+        # After all retries exhausted: behavior depends on config
+        if config.vision_auto_continue_on_uncertain:
+            logger.warning(
+                "[yellow]Vision uncertain after %d attempts, but executor reported success. "
+                "Auto-continuing (VISION_AUTO_CONTINUE=true)...[/yellow]", attempt + 1
+            )
+            if step.undo_action and step.undo_target:
+                self.undo_stack.append(step)
+            return True, ""
+        else:
+            logger.warning(
+                "[yellow]Vision verification failed after %d attempts. "
+                "Reporting failure (set VISION_AUTO_CONTINUE=true to override).[/yellow]", attempt + 1
+            )
+            return False, f"Vision verification failed after {attempt + 1} attempts: {v_msg}"
 
     async def rollback(self, n: int = -1) -> None:
         """
@@ -318,8 +391,8 @@ class StepRunner:
             if not step.undo_action or not step.undo_target:
                 continue
             
-            action_val = step.action.value if hasattr(step.action, 'value') else step.action
-            undo_action_val = step.undo_action.value if hasattr(step.undo_action, 'value') else step.undo_action
+            action_val = self._enum_val(step.action)
+            undo_action_val = self._enum_val(step.undo_action)
             logger.info("Reversing action: %s %s -> %s %s", action_val, step.target, undo_action_val, step.undo_target)
             
             # Create a reverse step

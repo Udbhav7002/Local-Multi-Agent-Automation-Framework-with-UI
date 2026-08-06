@@ -3,7 +3,10 @@ CLI execution strategy — runs shell commands via asyncio subprocess.
 """
 # pylint: disable=broad-exception-caught
 import asyncio
+import shlex
 from typing import Tuple
+
+SHELL_METACHARACTERS = {'|', ';', '&&', '||', '`', '$(', '>', '>>', '<', '<<'}
 
 from core.config import config
 from core.logger import setup_logger
@@ -20,10 +23,24 @@ class CLIExecutor:
 
     async def _run_command(self, command: str) -> Tuple[bool, str]:
         """Executes a native command via subprocess on macOS."""
+        # Pre-filter: reject dangerous metacharacters
+        for meta in SHELL_METACHARACTERS:
+            if meta in command:
+                logger.warning("Blocked command with shell metacharacter '%s': %s", meta, command)
+                return False, f"Command blocked: contains unsafe shell operator '{meta}'"
+        
+        try:
+            parts = shlex.split(command)
+        except ValueError as e:
+            return False, f"Command parsing failed: {e}"
+        
+        if not parts:
+            return False, "Empty command"
+            
         try:
             logger.debug("Running CLI command: %s", command)
-            process = await asyncio.create_subprocess_shell(
-                command,
+            process = await asyncio.create_subprocess_exec(
+                *parts,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

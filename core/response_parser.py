@@ -18,6 +18,8 @@ class ResponseParser:
     Handles common LLM quirks: <think> blocks, markdown fences,
     trailing commas, and embedded prose around JSON.
     """
+    
+    REQUIRED_STEP_KEYS = {"action", "target", "method"}
 
     @staticmethod
     def clean_and_extract_json(
@@ -79,9 +81,37 @@ class ResponseParser:
         return content.strip()
 
     @staticmethod
+    def validate_action_step(step: dict, step_index: int = 0) -> dict:
+        """
+        Validates that a Worker action step dict has all required keys.
+        Raises ValueError if the step is malformed.
+        """
+        if not isinstance(step, dict):
+            raise ValueError(
+                f"Worker step {step_index} is not a dict: {type(step).__name__}"
+            )
+        
+        missing = ResponseParser.REQUIRED_STEP_KEYS - set(step.keys())
+        if missing:
+            raise ValueError(
+                f"Worker step {step_index} missing required keys: {missing}. "
+                f"Got: {step}"
+            )
+        
+        # Validate types
+        for key in ('action', 'target', 'method'):
+            if not isinstance(step.get(key), str):
+                raise ValueError(
+                    f"Worker step {step_index} key '{key}' must be a string, "
+                    f"got {type(step.get(key)).__name__}"
+                )
+        
+        return step
+
+    @staticmethod
     def parse_worker_output(raw_json: str) -> list:
         """
-        Parses Worker JSON output into a list of action step dicts.
+        Parses Worker JSON output into a validated list of action step dicts.
         Handles the common case where the Worker returns a single
         dict instead of a list.
         """
@@ -93,5 +123,10 @@ class ResponseParser:
             raise ValueError(
                 f"Expected list or dict from Worker, got {type(data).__name__}"
             )
-
-        return data
+        
+        # Validate each step
+        validated = []
+        for i, step in enumerate(data):
+            validated.append(ResponseParser.validate_action_step(step, i))
+        
+        return validated

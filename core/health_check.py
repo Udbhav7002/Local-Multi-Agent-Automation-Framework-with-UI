@@ -93,4 +93,22 @@ def check_dependencies() -> bool:
     if all_ok:
         logger.debug("All dependency checks passed.")
 
+    # --- Model availability ---
+    try:
+        import ollama
+        from core.config import config
+        available_models = [m.get('name', m.get('model', '')) for m in ollama.list().get('models', [])]
+        required_models = [config.manager_model, config.worker_model]
+        for model in required_models:
+            if model and model not in available_models:
+                # Check without tag
+                base_name = model.split(':')[0]
+                if not any(base_name in m for m in available_models):
+                    console.print(
+                        f"  [#ffaa00]![/#ffaa00] [#888888]Model '{model}' not found locally. "
+                        f"Pull it with: ollama pull {model}[/#888888]"
+                    )
+    except Exception:
+        pass  # Don't fail startup over this
+
     return all_ok

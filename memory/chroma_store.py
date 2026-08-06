@@ -21,8 +21,13 @@ class ChromaStore:
     """
     Handles interactions with ChromaDB for semantic memory retrieval.
     Stores past execution plans and their success/failure states.
+    
+    WARNING: Task descriptions and plans are stored unencrypted in the local
+    ChromaDB database. Do not include sensitive data (passwords, API keys, etc.)
+    in task descriptions. The database is stored at: <project_root>/chroma_db/
     """
     def __init__(self) -> None:
+        logger.info("ChromaStore initialized. Data stored unencrypted at: %s", _CHROMA_DB_PATH)
         # Initialize chromadb persistent client
         self.client = chromadb.PersistentClient(path=_CHROMA_DB_PATH)
         self.success_collection = self.client.get_or_create_collection(
@@ -145,14 +150,31 @@ class ChromaStore:
             return []
 
     def close(self) -> None:
-        """Gracefully release the ChromaDB connection and flush to disk."""
+        """Gracefully release the ChromaDB connection."""
         try:
-            logger.debug("Closing ChromaStore and flushing to disk...")
-            # PersistentClient doesn't strictly require closing, but clearing references 
-            # helps trigger garbage collection of the SQLite connections.
+            logger.debug("Closing ChromaStore...")
+            # PersistentClient auto-persists on write operations.
+            # Explicitly clear references to release SQLite file locks
+            # and trigger garbage collection of database connections.
             self.success_collection = None
             self.failure_collection = None
             self.episodes_collection = None
-            self.client = None
+            if self.client is not None:
+                # Force garbage collection of the underlying SQLite connection
+                del self.client
+                self.client = None
+            logger.debug("ChromaStore closed successfully.")
         except Exception as e:
             logger.error("Error closing ChromaStore: %s", e)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.close()

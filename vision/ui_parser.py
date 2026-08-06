@@ -34,6 +34,8 @@ class UIParser: # pylint: disable=too-few-public-methods
         Uses OCR as the primary method to find text on screen.
         Falls back to Windows Accessibility Tree if OCR fails.
         """
+        if not element_description or not element_description.strip():
+            return None
         logger.info(
             "Scanning for '%s' using Vision OCR...", element_description)
         coords = self._find_element_ocr(element_description)
@@ -49,33 +51,15 @@ class UIParser: # pylint: disable=too-few-public-methods
             self, element_description: str) -> Optional[Tuple[int, int]]: # pylint: disable=too-many-locals
         """
         Captures the screen and uses OpenCV + Tesseract to find bounding boxes of text.
-        Attempts to use C++ vision_ext for speed, falling back to Python.
         """
         try:
             # 1. Capture screen using context manager for display resilience
             with mss.mss() as sct:
-                monitor = sct.monitors[1]  # primary monitor
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
                 screenshot = sct.grab(monitor)
 
             # Convert to numpy array for OpenCV
             img = np.array(screenshot)
-
-            # Try C++ extension first
-            try:
-                import vision_ext
-                logger.debug("Using C++ vision_ext for OCR...")
-                coords = vision_ext.find_element(img, element_description)  # type: ignore[attr-defined]
-                if coords:
-                    center_x, center_y = coords
-                    center_x += monitor['left']
-                    center_y += monitor['top']
-                    logger.info("C++ OCR Found '%s' at (%s, %s)", element_description, center_x, center_y)
-                    return (center_x, center_y)
-                return None
-            except ImportError:
-                logger.debug("vision_ext not available. Falling back to Python implementation.")
-            except Exception as e:
-                logger.error("C++ vision_ext failed: %s. Falling back.", e)
 
             # Convert from BGRA (mss default) to BGR, then to Grayscale
             gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
@@ -144,7 +128,7 @@ class UIParser: # pylint: disable=too-few-public-methods
 
             return None
 
-        except (FileNotFoundError, ValueError, cv2.error) as e:
+        except (FileNotFoundError, ValueError, cv2.error, pytesseract.TesseractError, IndexError, RuntimeError) as e:
             logger.error("OCR Parsing failed: %s", e)
             logger.debug("Did you install Tesseract-OCR on your system?")
             return None
@@ -164,7 +148,7 @@ class UIParser: # pylint: disable=too-few-public-methods
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             else:
                 with mss.mss() as sct:
-                    monitor = sct.monitors[1]
+                    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
                     screenshot = sct.grab(monitor)
                 img = np.array(screenshot)
                 gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
@@ -195,6 +179,6 @@ class UIParser: # pylint: disable=too-few-public-methods
             extracted_text = " ".join([" ".join(words) for words in lines.values()])
             return extracted_text
 
-        except (FileNotFoundError, ValueError, cv2.error) as e:
+        except (FileNotFoundError, ValueError, cv2.error, pytesseract.TesseractError, IndexError, RuntimeError) as e:
             logger.error("Failed to extract text: %s", e)
             return ""

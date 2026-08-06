@@ -55,7 +55,7 @@ class OllamaClient:
     - Uses AsyncClient for persistent HTTP connection pooling
     """
 
-    def __init__(self, num_ctx: int = 8192, keep_alive: int = 0) -> None:
+    def __init__(self, num_ctx: int = 8192, keep_alive: int | str = "5m") -> None:
         self._num_ctx = num_ctx
         self._keep_alive = keep_alive
         
@@ -82,9 +82,10 @@ class OllamaClient:
         images: Optional[list[str]] = None,
         options: Optional[dict] = None,
     ) -> str:
-        """Send a chat completion via the Ollama Async SDK."""
-
-        # Merge defaults with custom options if provided
+        """Send a chat completion via the Ollama Async SDK with retry and timeout."""
+        import asyncio
+        from core.config import config
+        
         ollama_options = {"num_ctx": self._num_ctx}
         if options:
             ollama_options.update(options)
@@ -98,13 +99,38 @@ class OllamaClient:
         if format:
             kwargs["format"] = format
 
-        logger.debug("LLM request: model=%s, msgs=%d, format=%s",
-                      model, len(messages), format)
-
-        # Await the async client natively (no threads needed!)
-        response = await self._client.chat(**kwargs)
-        content = response.get("message", {}).get("content", "").strip()
-        return str(content)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.debug("LLM request: model=%s, msgs=%d, format=%s (attempt %d)",
+                              model, len(messages), format, attempt + 1)
+                
+                response = await asyncio.wait_for(
+                    self._client.chat(**kwargs),
+                    timeout=config.llm_timeout_seconds
+                )
+                content = response.get("message", {}).get("content", "").strip()
+                return str(content)
+                
+            except asyncio.TimeoutError:
+                logger.error("LLM call timed out after %ss (attempt %d/%d)",
+                             config.llm_timeout_seconds, attempt + 1, max_retries)
+                if attempt == max_retries - 1:
+                    raise TimeoutError(
+                        f"LLM call timed out after {config.llm_timeout_seconds}s "
+                        f"({max_retries} attempts)"
+                    )
+            except (ConnectionError, OSError) as e:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning(
+                    "Ollama connection error (attempt %d/%d): %s. Retrying in %ds...",
+                    attempt + 1, max_retries, e, wait_time
+                )
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(wait_time)
+        
+        raise RuntimeError("LLM call failed after all retries")  # Should not reach here
 
 
 class FakeLLMClient:

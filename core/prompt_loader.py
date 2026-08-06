@@ -29,7 +29,13 @@ class PromptLoader:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
             if not isinstance(data, dict):
-                data = {}
+                raise ValueError(f"Prompt file {path} must contain a YAML mapping, got {type(data).__name__}")
+            # Validate that at least one key contains a prompt string
+            if not any(isinstance(v, str) and len(v) > 10 for v in data.values()):
+                logger.warning(
+                    "Prompt file %s has no string values longer than 10 chars — "
+                    "this may indicate a malformed prompt file.", path
+                )
         self._cache[agent_name] = data
         return data
 

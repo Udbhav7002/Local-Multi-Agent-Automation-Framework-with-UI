@@ -31,14 +31,37 @@ class FrameworkBuilder:
         from core.events import EventBus
         event_bus = EventBus()
 
+        # Register default event subscribers for observability
+        from core.logger import setup_logger
+        _event_logger = setup_logger("EventBus")
+        
+        def _log_event(event):
+            level = getattr(event, 'level', 'INFO').upper()
+            msg = getattr(event, 'message', str(event))
+            if level == 'SUCCESS':
+                _event_logger.info("[green]%s[/green]", msg)
+            elif level == 'WARNING':
+                _event_logger.warning(msg)
+            elif level == 'ERROR':
+                _event_logger.error(msg)
+            else:
+                _event_logger.info(msg)
+        
+        event_bus.subscribe("agent_action", _log_event)
+        event_bus.subscribe("step_executed", _log_event)
+        event_bus.subscribe("task_started", _log_event)
+        event_bus.subscribe("task_completed", _log_event)
+
         # 1. LLM Client — single async instance shared by all agents
-        llm = OllamaClient(num_ctx=config.num_ctx, keep_alive=0)
+        llm = OllamaClient(num_ctx=config.num_ctx, keep_alive="5m")
 
         # 2. Common Utilities
         ui_parser = UIParser()
         prompt_loader = PromptLoader()
 
         # 3. Agents — all receive LLMClient, PromptLoader, and event_bus
+        # Router, Planner, and Critic all use the 'manager' model by default.
+        # The user can swap individual agent models at runtime via the /model command.
         router = Router(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
         planner = Planner(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
         critic = Critic(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)

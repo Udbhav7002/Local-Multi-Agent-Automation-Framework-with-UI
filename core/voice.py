@@ -28,17 +28,25 @@ class VoiceInput:
             print("  [#888888]Transcribing...[/#888888]")
             
             try:
-                # Try local whisper first
-                # requires: pip install openai-whisper
-                text = str(self.recognizer.recognize_whisper(audio, model="base.en").strip())  # type: ignore[attr-defined]
-                logger.debug("Transcribed via Whisper: %s", text)
+                # Try local whisper first (fully offline)
+                text = str(self.recognizer.recognize_whisper(audio, model="base.en").strip())
+                logger.debug("Transcribed via Whisper (local): %s", text)
                 return text
             except Exception as e:
-                logger.debug("Whisper failed or not installed (%s). Falling back to Google SR.", e)
-                # Fallback to Google SR
-                text = str(self.recognizer.recognize_google(audio).strip())  # type: ignore[attr-defined]
-                logger.debug("Transcribed via Google: %s", text)
-                return text
+                logger.debug("Whisper failed or not installed (%s).", e)
+                # Fallback to Google SR — NOTE: this sends audio to Google's cloud servers
+                logger.warning(
+                    "Falling back to Google Speech Recognition (cloud). "
+                    "Install openai-whisper for fully offline transcription: pip install openai-whisper"
+                )
+                try:
+                    text = str(self.recognizer.recognize_google(audio).strip())
+                    logger.debug("Transcribed via Google SR (cloud): %s", text)
+                    return text
+                except Exception as e2:
+                    logger.error("Google Speech Recognition also failed: %s", e2)
+                    print("  [#ff0000]All transcription methods failed.[/#ff0000]")
+                    return ""
 
         except sr.WaitTimeoutError:
             print("  [#ff0000]Listening timed out. No speech detected.[/#ff0000]")

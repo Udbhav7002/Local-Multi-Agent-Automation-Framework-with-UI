@@ -15,90 +15,109 @@ class GUIExecutor:
     """
     Executes GUI actions (click, type, hotkey, search_start_menu) using
     pyautogui for input simulation and an optional UIParser for OCR-based
-    element finding.
+    element finding. Synchronized via GUI_LOCK.
     """
 
-    def __init__(self, ui_parser: Optional[Any] = None) -> None:
+    GUI_LOCK: Optional[asyncio.Lock] = None
+
+    def __init__(
+        self,
+        ui_parser: Optional[Any] = None,
+        lock: Optional[asyncio.Lock] = None,
+    ) -> None:
         self.ui_parser = ui_parser
+        self._lock = lock
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Returns instance lock or class-level GUI_LOCK, initialized lazily."""
+        if self._lock is not None:
+            return self._lock
+
+        if GUIExecutor.GUI_LOCK is None:
+            GUIExecutor.GUI_LOCK = asyncio.Lock()
+
+        return GUIExecutor.GUI_LOCK
 
     async def execute(self, action: str, target: str) -> Tuple[bool, str]:
-        """Execute a GUI action."""
-        try:
-            import pyautogui  # pylint: disable=import-outside-toplevel
-            pyautogui.FAILSAFE = True
+        """Execute a GUI action under GUI_LOCK."""
+        async with self.lock:
+            try:
+                import pyautogui  # pylint: disable=import-outside-toplevel
+                pyautogui.FAILSAFE = True
 
-            if action == "type":
-                logger.info("Vision Typing: '%s'", target)
-                pyautogui.write(target, interval=0.05)
-                pyautogui.press('enter')
-                return True, f"Typed '{target}' and pressed enter."
+                if action == "type":
+                    logger.info("Vision Typing: '%s'", target)
+                    pyautogui.write(target, interval=0.05)
+                    pyautogui.press('enter')
+                    return True, f"Typed '{target}' and pressed enter."
 
-            if action == "hotkey":
-                logger.info("Vision Hotkey: '%s'", target)
-                key_map = {
-                    'cmd': 'command', 'command': 'command',
-                    'ctrl': 'ctrl', 'control': 'ctrl',
-                    'alt': 'alt', 'option': 'alt',
-                    'shift': 'shift',
-                    'space': 'space', 'spacebar': 'space',
-                    'enter': 'enter', 'return': 'enter',
-                    'del': 'delete', 'delete': 'delete',
-                    'esc': 'escape', 'escape': 'escape',
-                    'win': 'win', 'windows': 'win',
-                }
-                keys = [
-                    key_map.get(k.strip().lower(), k.strip().lower())
-                    for k in target.split('+')
-                ]
-                pyautogui.hotkey(*keys)
-                return True, f"Pressed hotkey {'+'.join(keys)}."
+                if action == "hotkey":
+                    logger.info("Vision Hotkey: '%s'", target)
+                    key_map = {
+                        'cmd': 'command', 'command': 'command',
+                        'ctrl': 'ctrl', 'control': 'ctrl',
+                        'alt': 'alt', 'option': 'alt',
+                        'shift': 'shift',
+                        'space': 'space', 'spacebar': 'space',
+                        'enter': 'enter', 'return': 'enter',
+                        'del': 'delete', 'delete': 'delete',
+                        'esc': 'escape', 'escape': 'escape',
+                        'win': 'win', 'windows': 'win',
+                    }
+                    keys = [
+                        key_map.get(k.strip().lower(), k.strip().lower())
+                        for k in target.split('+')
+                    ]
+                    pyautogui.hotkey(*keys)
+                    return True, f"Pressed hotkey {'+'.join(keys)}."
 
-            if action == "search_start_menu":
-                logger.info("Vision Spotlight Search: '%s'", target)
-                if platform.system() == "Darwin":
-                    pyautogui.hotkey('command', 'space')
-                else:
-                    pyautogui.press('win')
-                await asyncio.sleep(1.0)
-                pyautogui.write(target, interval=0.05)
-                await asyncio.sleep(1.0)
-                pyautogui.press('enter')
-                return True, f"Searched Spotlight for '{target}' and pressed enter."
-
-            # --- Actions that require OCR coordinate finding ---
-            if self.ui_parser is None:
-                return False, "UI Parser not initialized for coordinate finding."
-
-            await asyncio.sleep(0.1) # Prevent race conditions in UI thread
-            coords = self.ui_parser.find_element(target)
-            if not coords:
-                if action == "click" and "start" in target.lower():
+                if action == "search_start_menu":
+                    logger.info("Vision Spotlight Search: '%s'", target)
                     if platform.system() == "Darwin":
-                        logger.info("Falling back to Command+Space for Start/Spotlight.")
                         pyautogui.hotkey('command', 'space')
-                        return True, "Pressed Command+Space as fallback for Start button."
                     else:
-                        logger.info("Falling back to Windows key for Start menu.")
                         pyautogui.press('win')
-                        return True, "Pressed Windows key as fallback for Start button."
-                logger.warning("Could not find element '%s' on screen.", target)
-                return False, f"Could not find element '{target}' on screen."
+                    await asyncio.sleep(1.0)
+                    pyautogui.write(target, interval=0.05)
+                    await asyncio.sleep(1.0)
+                    pyautogui.press('enter')
+                    return True, f"Searched Spotlight for '{target}' and pressed enter."
 
-            if not isinstance(coords, (list, tuple)) or len(coords) != 2:
-                logger.warning("Invalid coordinates returned by UI parser: %s", coords)
-                return False, f"Invalid coordinates returned for '{target}'."
+                # --- Actions that require OCR coordinate finding ---
+                if self.ui_parser is None:
+                    return False, "UI Parser not initialized for coordinate finding."
 
-            x, y = coords
+                await asyncio.sleep(0.1) # Prevent race conditions in UI thread
+                coords = self.ui_parser.find_element(target)
+                if not coords:
+                    if action == "click" and "start" in target.lower():
+                        if platform.system() == "Darwin":
+                            logger.info("Falling back to Command+Space for Start/Spotlight.")
+                            pyautogui.hotkey('command', 'space')
+                            return True, "Pressed Command+Space as fallback for Start button."
+                        else:
+                            logger.info("Falling back to Windows key for Start menu.")
+                            pyautogui.press('win')
+                            return True, "Pressed Windows key as fallback for Start button."
+                    logger.warning("Could not find element '%s' on screen.", target)
+                    return False, f"Could not find element '{target}' on screen."
 
-            if action == "click":
-                logger.info("Vision Click at (%s, %s) for '%s'", x, y, target)
-                pyautogui.moveTo(x, y, duration=0.5)
-                pyautogui.click()
-                return True, f"Clicked on '{target}' at ({x}, {y})."
+                if not isinstance(coords, (list, tuple)) or len(coords) != 2:
+                    logger.warning("Invalid coordinates returned by UI parser: %s", coords)
+                    return False, f"Invalid coordinates returned for '{target}'."
 
-            logger.warning("Unsupported GUI action: %s", action)
-            raise ValueError(f"Unsupported GUI action: {action}")
+                x, y = coords
 
-        except Exception as e:
-            logger.exception("GUI Execution Error: %s", e)
-            return False, f"GUI Error: {e}"
+                if action == "click":
+                    logger.info("Vision Click at (%s, %s) for '%s'", x, y, target)
+                    pyautogui.moveTo(x, y, duration=0.5)
+                    pyautogui.click()
+                    return True, f"Clicked on '{target}' at ({x}, {y})."
+
+                logger.warning("Unsupported GUI action: %s", action)
+                raise ValueError(f"Unsupported GUI action: {action}")
+
+            except Exception as e:
+                logger.exception("GUI Execution Error: %s", e)
+                return False, f"GUI Error: {e}"

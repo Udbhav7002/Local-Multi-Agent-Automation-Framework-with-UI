@@ -69,6 +69,10 @@ class Orchestrator:
 
     async def shutdown(self) -> None:
         """Gracefully shut down all resources."""
+        # Cancel in-flight steps
+        if hasattr(self.step_runner, 'cancel'):
+            self.step_runner.cancel()
+
         # Close LLM client (if it has a close method)
         for agent in (self.router, self.planner, self.critic, self.worker):
             if hasattr(agent, 'llm') and hasattr(agent.llm, 'close'):
@@ -99,7 +103,12 @@ class Orchestrator:
             await self.preferences.load()
             self._prefs_loaded = True
              
-        logger.info("Processing user input: '%s'", user_text)
+        import uuid
+        from core.logger import set_task_id
+        
+        task_id = str(uuid.uuid4())[:8]
+        set_task_id(task_id)
+        logger.info("[task:%s] Processing user input: '%s'", task_id, user_text)
 
         # 1. Fast paths: Memory Cache
         cached_plan = self.memory.get_plan(user_text)

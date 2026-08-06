@@ -1,6 +1,10 @@
 """
 Configuration module for the Local Multi-Agent Automation Framework.
 """
+# Configuration Precedence (highest to lowest):
+# 1. settings.json (runtime-persisted via Config.save())
+# 2. Environment variables
+# 3. Dataclass defaults below
 import os
 import json
 import platform
@@ -46,6 +50,11 @@ class Config:
         "AUTO_CONTINUE", "False").strip().lower() in (
         "true", "1", "yes", "y")
 
+    # Vision verification
+    vision_auto_continue_on_uncertain: bool = os.getenv(
+        "VISION_AUTO_CONTINUE", "False").strip().lower() in (
+        "true", "1", "yes", "y")
+
     # API endpoints
     ollama_base_url: str = os.getenv(
         "OLLAMA_BASE_URL", "http://localhost:11434")
@@ -67,7 +76,8 @@ class Config:
     cli_timeout_seconds: float = _get_env_float("CLI_TIMEOUT", 60.0)
     cli_max_output_chars: int = _get_env_int("CLI_MAX_OUTPUT", 2000)
     
-    # Specific action timeouts (override cli_timeout_seconds if specified)
+    # Specific action timeouts (override cli_timeout_seconds for non-CLI actions).
+    # action_timeouts['run_command'] inherits from cli_timeout_seconds by default.
     action_timeouts: dict[str, float] = field(default_factory=lambda: {
         "run_command": _get_env_float("CLI_TIMEOUT", 60.0),
         "open_app": 10.0,
@@ -82,6 +92,9 @@ class Config:
     # LLM safety
     llm_timeout_seconds: float = _get_env_float("LLM_TIMEOUT", 120.0)
     max_prompt_chars: int = _get_env_int("MAX_PROMPT_CHARS", 24000)
+
+    # Sandbox
+    sandbox_root: str = os.getenv("SANDBOX_ROOT", "")  # Empty = unrestricted
 
     @property
     def os_context(self) -> str:
@@ -132,17 +145,30 @@ class Config:
                     self.vision_model = data["vision_model"]
                 if "num_ctx" in data:
                     self.num_ctx = data["num_ctx"]
+                for key in ('max_plan_regenerations', 'max_step_retries', 'cli_timeout_seconds',
+                            'llm_timeout_seconds', 'memory_success_threshold',
+                            'memory_failure_threshold', 'memory_episode_threshold'):
+                    if key in data:
+                        setattr(self, key, type(getattr(self, key))(data[key]))
             except Exception as e:
                 print(f"Error loading settings: {e}")
 
     def save(self):
+        """Persist all runtime-configurable settings to disk."""
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "manager_model": self.manager_model,
                     "worker_model": self.worker_model,
                     "vision_model": self.vision_model,
-                    "num_ctx": self.num_ctx
+                    "num_ctx": self.num_ctx,
+                    "max_plan_regenerations": self.max_plan_regenerations,
+                    "max_step_retries": self.max_step_retries,
+                    "cli_timeout_seconds": self.cli_timeout_seconds,
+                    "llm_timeout_seconds": self.llm_timeout_seconds,
+                    "memory_success_threshold": self.memory_success_threshold,
+                    "memory_failure_threshold": self.memory_failure_threshold,
+                    "memory_episode_threshold": self.memory_episode_threshold,
                 }, f, indent=4)
         except Exception as e:
             print(f"Error saving settings: {e}")

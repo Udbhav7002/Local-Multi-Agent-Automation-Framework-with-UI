@@ -1,6 +1,6 @@
 """
 Main entry point for the Local Multi-Agent Automation Framework.
-Pure Terminal/CLI implementation.
+Pure Terminal/CLI implementation with rich interactive dashboard.
 """
 # pylint: disable=broad-exception-caught, line-too-long
 
@@ -8,6 +8,11 @@ import asyncio
 import sys
 import argparse
 import signal
+import os
+import sqlite3
+import platform
+import json
+import urllib.request
 
 def _hide_dock_icon():
     if sys.platform == 'darwin':
@@ -22,6 +27,10 @@ def _hide_dock_icon():
 
 from rich.prompt import Prompt
 from rich.table import Table
+from rich.panel import Panel
+from rich import box
+from rich.columns import Columns
+from rich.align import Align
 
 from core.config import config
 from core.factory import FrameworkBuilder
@@ -32,76 +41,207 @@ from core.voice import VoiceInput
 
 logger = setup_logger("Main")
 
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_JOBS_DB_PATH = os.path.join(_PROJECT_ROOT, "jobs.db")
+
+
+def _get_ollama_status() -> tuple[bool, str]:
+    """Check if Ollama server is responsive."""
+    try:
+        url = f"{config.ollama_base_url.rstrip('/')}/api/tags"
+        req = urllib.request.Request(url, headers={"User-Agent": "LocalAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                models = len(data.get("models", []))
+                return True, f"Online ({models} local models available)"
+    except Exception:
+        pass
+    return False, "Offline (http://localhost:11434 unreachable)"
+
 
 def draw_splash_screen(router_model: str, planner_model: str, vision_model: str) -> None:
-    """Draws the ultra-minimalist 'opencode' style terminal splash screen."""
+    """Draws a premium, practical terminal dashboard on startup."""
 
-    # Blocky, solid ASCII Art
-    ascii_art = """[#444444]
-█      ██████  ██████  █████  
-█      
-█     ██    ██ ██     ██   ██ █      
-█     ██    ██ ██     ███████ █      
-█     ██    ██ ██     ██   ██ █      
-█████  ██████   ██████ ██   ██ █████ 
+    ascii_art = """[bold cyan]
+  ███████ ████████  █████  ██████  ████████ 
+  ██         ██    ██   ██ ██   ██    ██    
+  ███████    ██    ███████ ██████     ██    
+       ██    ██    ██   ██ ██   ██    ██    
+  ███████    ██    ██   ██ ██   ██    ██    
+[/bold cyan]"""
 
- █████   ██████  ███████ ███    
-██ ████████ 
-██   ██ ██       ██      ████   ██    ██    
-███████ ██   ███ █████   ██ ██  ██    ██    
-██   ██ ██    ██ ██      ██  ██ ██    ██    
-██   ██  ██████  ███████ ██   ████    ██    
-[/#444444]"""
-
-    # Print logo and status
     console.print(ascii_art)
-    console.print("  [#00ff00]●[/#00ff00] [#888888]Local Agent Terminal[/#888888]\n")
+    
+    ollama_ok, ollama_msg = _get_ollama_status()
+    status_pill = "[bold green]● SYSTEM READY[/bold green]" if ollama_ok else "[bold yellow]⚠ OLLAMA OFFLINE[/bold yellow]"
+    os_name = f"{platform.system()} ({platform.machine()})"
+    
+    status_bar = f"  {status_pill}   |   [bold white]OS:[/bold white] {os_name}   |   [bold white]Ollama:[/bold white] {ollama_msg}"
+    console.print(status_bar)
+    console.print("  [#444444]" + "─" * 70 + "[/#444444]\n")
 
-    # Models table (clean, no borders, lots of padding)
-    models_table = Table.grid(padding=(0, 4))
-    models_table.add_column(style="bold #ffffff", width=15)
-    models_table.add_column(style="#888888")
+    # Left table: Active Models
+    models_table = Table(title="🤖 Active Agent Army", box=box.ROUNDED, border_style="cyan", padding=(0, 2))
+    models_table.add_column("Agent Role", style="bold white", width=14)
+    models_table.add_column("Model Name", style="bold green")
+    models_table.add_row("🧠 Manager", planner_model)
+    models_table.add_row("⚡ Worker", config.worker_model)
+    models_table.add_row("👁 Vision", vision_model)
 
-    models_table.add_row("Manager", planner_model)
-    models_table.add_row("Worker", config.worker_model)
-    models_table.add_row("Vision", vision_model)
+    # Right table: Slash Commands
+    commands_table = Table(title="⚡ Quick Commands", box=box.ROUNDED, border_style="blue", padding=(0, 2))
+    commands_table.add_column("Command", style="bold yellow", width=12)
+    commands_table.add_column("Action", style="white")
+    commands_table.add_row("/help", "Show detailed command guide")
+    commands_table.add_row("/status", "Live system & health dashboard")
+    commands_table.add_row("/skills", "View cached reusable skill plans")
+    commands_table.add_row("/jobs", "Inspect background API jobs")
+    commands_table.add_row("/model", "Swap local LLM models on the fly")
+    commands_table.add_row("/history", "View session task history")
+    commands_table.add_row("/clear", "Reset & clear terminal display")
+    commands_table.add_row("/quit | /stop", "Exit the framework cleanly")
 
-    # Commands table
-    commands_table = Table.grid(padding=(0, 4))
-    commands_table.add_column(style="bold #ffffff", width=15)
-    commands_table.add_column(style="#888888")
-
-    commands_table.add_row("/model", "Change agent models (e.g., /model manager qwen2.5-coder:14b)")
-    commands_table.add_row("/clear", "Clear the terminal screen")
-    commands_table.add_row("/save", "Save current session state")
-    commands_table.add_row("/quit", "Exit the framework")
-
-    # Layout sections with headers
-    console.print("  [bold #ffffff]Models[/bold #ffffff]")
-    console.print("  [#444444]──────────────[/#444444]")
-    console.print(models_table)
+    console.print(Columns([models_table, commands_table], padding=(0, 4)))
     console.print()
 
-    console.print("  [bold #ffffff]Commands[/bold #ffffff]")
-    console.print("  [#444444]──────────────[/#444444]")
-    console.print(commands_table)
-    console.print("\n")
+    # Practical Examples Box
+    examples_text = (
+        "[bold cyan]1.[/bold cyan] \"Open Safari and search for Tokyo weather forecast\"\n"
+        "[bold cyan]2.[/bold cyan] \"Take a screenshot and summarize visible text on screen\"\n"
+        "[bold cyan]3.[/bold cyan] \"Open Terminal, check disk space, and report available GB\"\n"
+        "[bold cyan]4.[/bold cyan] \"List top 5 running processes by CPU usage and explain\""
+    )
+    console.print(Panel(
+        examples_text,
+        title="[bold green]💡 Try These Practical Commands[/bold green]",
+        border_style="green",
+        padding=(1, 2)
+    ))
+    console.print()
+
+
+def _show_status(orchestrator: Orchestrator) -> None:
+    """Displays a comprehensive diagnostic dashboard in the terminal."""
+    ollama_ok, ollama_msg = _get_ollama_status()
+    os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    
+    # Check Jobs DB stats
+    total_jobs, completed_jobs, failed_jobs = 0, 0, 0
+    if os.path.exists(_JOBS_DB_PATH):
+        try:
+            with sqlite3.connect(_JOBS_DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT count(*) FROM jobs")
+                total_jobs = cursor.fetchone()[0]
+                cursor.execute("SELECT count(*) FROM jobs WHERE status = 'COMPLETED'")
+                completed_jobs = cursor.fetchone()[0]
+                cursor.execute("SELECT count(*) FROM jobs WHERE status = 'FAILED'")
+                failed_jobs = cursor.fetchone()[0]
+        except Exception:
+            pass
+
+    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 3))
+    table.add_column("Metric", style="bold white", width=22)
+    table.add_column("Value")
+    table.add_row("Operating System", os_info)
+    table.add_row("Ollama Connection", f"[green]{ollama_msg}[/green]" if ollama_ok else f"[red]{ollama_msg}[/red]")
+    table.add_row("Manager Model", f"[cyan]{orchestrator.planner.model_name}[/cyan]")
+    table.add_row("Worker Model", f"[cyan]{orchestrator.worker.model_name}[/cyan]")
+    table.add_row("Vision Model", f"[cyan]{config.vision_model}[/cyan]")
+    table.add_row("SQLite Job Tracker", f"{total_jobs} total jobs ({completed_jobs} completed, {failed_jobs} failed)")
+    table.add_row("Session History", f"{len(orchestrator._conversation_history)} tasks in current session")
+
+    console.print(Panel(table, title="[bold cyan]📊 System Status & Health Dashboard[/bold cyan]", border_style="cyan", padding=(1, 2)))
+    console.print()
+
+
+def _show_skills(orchestrator: Orchestrator) -> None:
+    """Displays cached reusable skills in a Rich table."""
+    table = Table(title="🧠 Reusable Learned Skills (SkillLibrary)", box=box.ROUNDED, border_style="magenta", padding=(0, 2))
+    table.add_column("#", style="bold white", width=4)
+    table.add_column("Task Pattern", style="bold cyan")
+    table.add_column("Steps", style="green", width=10)
+    table.add_column("Failures", style="yellow", width=10)
+
+    try:
+        skills_cache = getattr(orchestrator.skill_library, "_cache", {})
+        if not skills_cache:
+            console.print("  [#888888]No reusable skills cached yet. Complete successful tasks to automatically build skills![/#888888]\n")
+            return
+        idx = 1
+        for task, data in skills_cache.items():
+            plan_steps = data.get("plan", [])
+            failures = data.get("failures", 0)
+            table.add_row(str(idx), task, str(len(plan_steps)), str(failures))
+            idx += 1
+        console.print(table)
+        console.print()
+    except Exception as e:
+        console.print(f"  [red]Error reading skill library: {e}[/red]\n")
+
+
+def _show_jobs() -> None:
+    """Displays recent background API jobs from SQLite jobs.db."""
+    if not os.path.exists(_JOBS_DB_PATH):
+        console.print("  [#888888]No jobs database found yet. Run tasks via API or './start.sh --api' to record jobs.[/#888888]\n")
+        return
+
+    table = Table(title="📋 Recent Background API Jobs (jobs.db)", box=box.ROUNDED, border_style="blue", padding=(0, 2))
+    table.add_column("Job ID", style="bold yellow", width=10)
+    table.add_column("Status", style="bold")
+    table.add_column("Created At", style="dim", width=20)
+    table.add_column("Result Summary", style="white")
+
+    try:
+        with sqlite3.connect(_JOBS_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 10").fetchall()
+            if not rows:
+                console.print("  [#888888]No jobs recorded yet.[/#888888]\n")
+                return
+            for row in rows:
+                status = row["status"]
+                style = "green" if status == "COMPLETED" else ("yellow" if status == "RUNNING" else ("red" if status == "FAILED" else "blue"))
+                result_str = (row["result"] or "")[:60]
+                if len(row["result"] or "") > 60:
+                    result_str += "..."
+                table.add_row(row["job_id"][:8], f"[{style}]{status}[/{style}]", (row["created_at"] or "")[:19].replace("T", " "), result_str)
+        console.print(table)
+        console.print()
+    except Exception as e:
+        console.print(f"  [red]Error querying jobs.db: {e}[/red]\n")
+
+
+def _show_history(orchestrator: Orchestrator) -> None:
+    """Displays current session task history."""
+    history = getattr(orchestrator, "_conversation_history", [])
+    if not history:
+        console.print("  [#888888]No tasks executed in the current session yet.[/#888888]\n")
+        return
+
+    table = Table(title="📜 Current Session Task History", box=box.ROUNDED, border_style="green", padding=(0, 2))
+    table.add_column("#", style="bold white", width=4)
+    table.add_column("Prompt / Command", style="bold cyan")
+    table.add_column("Outcome", style="white")
+
+    for idx, item in enumerate(history, 1):
+        table.add_row(str(idx), str(item.get("prompt", "")), str(item.get("outcome", "")))
+    console.print(table)
+    console.print()
 
 
 def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
     """Handles the /model CLI command to swap AI models on the fly."""
     if len(parts) == 1:
-        console.print("\n  [bold #ffffff]Current Models[/bold #ffffff]")
-        console.print("  [#444444]──────────────[/#444444]")
-
-        table = Table.grid(padding=(0, 4))
-        table.add_column(style="bold #ffffff", width=15)
-        table.add_column(style="#888888")
+        table = Table(title="🤖 Active Agent Models", box=box.ROUNDED, border_style="cyan", padding=(0, 3))
+        table.add_column("Agent", style="bold white", width=15)
+        table.add_column("Model Name", style="bold green")
         table.add_row("Manager", orchestrator.planner.model_name)
         table.add_row("Worker", orchestrator.worker.model_name)
         table.add_row("Vision", config.vision_model)
         console.print(table)
-        console.print("\n  [#888888]Usage: /model [manager|worker|vision] [new_model][/#888888]\n")
+        console.print("  [#888888]Usage: /model [manager|worker|vision] [new_model][/#888888]\n")
     elif len(parts) >= 3:
         target_agent = parts[1].lower()
         new_model = parts[2]
@@ -112,16 +252,16 @@ def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
             orchestrator.critic.model_name = new_model
             config.manager_model = new_model
             config.save()
-            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Manager models changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+            console.print(f"  [#00ff00]✓[/#00ff00] [#888888]Manager models changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
         elif target_agent == 'worker':
             orchestrator.worker.model_name = new_model
             config.worker_model = new_model
             config.save()
-            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Worker model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+            console.print(f"  [#00ff00]✓[/#00ff00] [#888888]Worker model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
         elif target_agent == 'vision':
             config.vision_model = new_model
             config.save()
-            console.print(f"  [#00ff00]*[/#00ff00] [#888888]Vision model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+            console.print(f"  [#00ff00]✓[/#00ff00] [#888888]Vision model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
         else:
             console.print("  [#ff0000]x Invalid agent. Use manager, worker, or vision.[/#ff0000]")
     else:
@@ -134,21 +274,15 @@ async def async_main(args: argparse.Namespace) -> None:
     This is the COMPOSITION ROOT — the only place where concrete
     implementations are wired to their abstract interfaces.
     """
-    # Startup health check
     if not check_dependencies():
         logger.critical("Critical dependencies missing - aborting launch")
         sys.exit(1)
 
-    # === Composition Root via Factory ===
     orchestrator = FrameworkBuilder.build_orchestrator()
-
-    # Clear terminal before drawing to enforce the clean look
     console.clear()
 
-    # Draw the premium splash screen
     draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
     
-    # Graceful shutdown handler
     shutdown_event = asyncio.Event()
     
     def signal_handler():
@@ -160,44 +294,64 @@ async def async_main(args: argparse.Namespace) -> None:
         loop.add_signal_handler(signal.SIGINT, signal_handler)
         loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-    # Input loop task
     async def input_loop():
         while not shutdown_event.is_set():
             try:
-                # Minimalist prompt
-                user_text = Prompt.ask("[bold #ffffff]/[/bold #ffffff]").strip()
+                user_text = (
+                    await asyncio.to_thread(
+                        Prompt.ask, "\n[bold cyan]agent[/bold cyan] [dim]❯[/dim]"
+                    )
+                ).strip()
     
                 if not user_text:
                     continue
-                if user_text.lower() in ['quit', 'exit', '/quit']:
-                    console.print("\n  [#888888]Shutting down...[/#888888]")
+                if user_text.lower() in ['quit', 'exit', '/quit', '/exit', 'stop', '/stop', './stop.sh', 'stop.sh', 'q']:
+                    console.print("\n  [#888888]Shutting down cleanly...[/#888888]")
                     if hasattr(orchestrator.step_runner, "executor"):
                         await orchestrator.step_runner.executor.shutdown()
                     break
     
                 if user_text.lower() == '/help':
-                    console.print("\n  [bold #ffffff]Commands[/bold #ffffff]")
-                    console.print("  [#444444]────────[/#444444]")
-                    help_table = Table.grid(padding=(0, 4))
-                    help_table.add_column(style="bold #ffffff", width=15)
-                    help_table.add_column(style="#888888")
-                    help_table.add_row("/help", "Show this message")
-                    help_table.add_row("/model", "Manage AI models")
-                    help_table.add_row("/voice", "Use voice to dictate a command")
-                    help_table.add_row("/clear", "Clear the terminal screen")
-                    help_table.add_row("/save", "Save current session state")
-                    help_table.add_row("/quit", "Exit the framework")
+                    help_table = Table(title="⚡ Available Commands & Shortcuts", box=box.ROUNDED, border_style="blue", padding=(0, 2))
+                    help_table.add_column("Command", style="bold yellow", width=14)
+                    help_table.add_column("Description", style="white")
+                    help_table.add_row("/help", "Show this help table")
+                    help_table.add_row("/status", "Display system health, Ollama status, and database metrics")
+                    help_table.add_row("/skills", "View reusable skills learned in SkillLibrary")
+                    help_table.add_row("/jobs", "Inspect recent background API jobs from sqlite")
+                    help_table.add_row("/history", "Show task history in current session")
+                    help_table.add_row("/model", "Swap models on the fly (e.g., /model worker qwen2.5-coder:14b)")
+                    help_table.add_row("/voice", "Dictate task using voice recognition")
+                    help_table.add_row("/clear", "Clear terminal and re-draw dashboard")
+                    help_table.add_row("/save", "Persist session state")
+                    help_table.add_row("/quit | /stop", "Exit the framework cleanly")
                     console.print(help_table)
                     console.print()
                     continue
     
+                if user_text.lower() == '/status':
+                    _show_status(orchestrator)
+                    continue
+
+                if user_text.lower() == '/skills':
+                    _show_skills(orchestrator)
+                    continue
+
+                if user_text.lower() == '/jobs':
+                    _show_jobs()
+                    continue
+
+                if user_text.lower() == '/history':
+                    _show_history(orchestrator)
+                    continue
+
                 if user_text.lower() == '/clear':
                     console.clear()
                     draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
                     continue
     
                 if user_text.lower() == '/save':
-                    console.print("  [#00ff00]*[/#00ff00] [#888888]Session state saved.[/#888888]")
+                    console.print("  [#00ff00]✓[/#00ff00] [#888888]Session state saved.[/#888888]")
                     continue
     
                 if user_text.lower().startswith('/model'):
@@ -210,7 +364,7 @@ async def async_main(args: argparse.Namespace) -> None:
                     user_text = voice_input.listen()
                     if not user_text:
                         continue
-                    console.print(f"  [bold #ffffff]You said:[/bold #ffffff] {user_text}")
+                    console.print(f"  [bold white]You said:[/bold white] {user_text}")
     
                 await orchestrator.process_prompt(user_text)
     
@@ -219,7 +373,6 @@ async def async_main(args: argparse.Namespace) -> None:
             except Exception as e:
                 logger.error("System Error: %s", e)
     
-    # Run the input loop until shutdown
     try:
         input_task = asyncio.create_task(input_loop())
         await asyncio.wait([input_task, asyncio.create_task(shutdown_event.wait())], return_when=asyncio.FIRST_COMPLETED)
@@ -243,7 +396,6 @@ def main() -> None:
         import os
         os.environ["DEBUG"] = "True"
 
-    # Suppress ugly internal asyncio Proactor pipe warnings on Windows shutdown
     warnings.filterwarnings("ignore", category=ResourceWarning)
 
     if sys.platform == 'win32':

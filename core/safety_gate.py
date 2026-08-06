@@ -14,6 +14,7 @@ class SafetyGate:
     """
     Strict Whitelist-based Safety Gate.
     Denies all commands by default unless explicitly whitelisted.
+    Note: This is an application-level gate and does not provide OS-level sandboxing.
     """
 
     def __init__(self, llm=None, model_name: str = "", prompt_loader=None):
@@ -26,6 +27,23 @@ class SafetyGate:
             "ls", "echo", "pwd", "whoami", "date", "cat", "git status",
             "dir", "systeminfo" # Added a few Windows equivalents 
         }
+
+    # Blocked URL schemes for browser safety
+    BLOCKED_URL_SCHEMES = ['javascript:', 'data:', 'file:///']
+
+    def is_safe_action(self, action: str, target: str, method: str) -> bool:
+        """Validates any action type, not just CLI commands."""
+        if method == 'cli':
+            return self.is_safe(target)
+        
+        if method == 'browser' and action == 'goto':
+            target_lower = target.lower().strip()
+            for scheme in self.BLOCKED_URL_SCHEMES:
+                if target_lower.startswith(scheme):
+                    logger.warning("Blocked dangerous URL scheme: %s", target)
+                    return False
+        
+        return True  # GUI actions and other browser actions pass by default
 
     def is_safe(self, command: str) -> bool:
         """

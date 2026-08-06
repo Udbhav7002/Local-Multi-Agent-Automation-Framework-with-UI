@@ -30,14 +30,18 @@ class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
         Classifies user text as either 'question' or 'task' using structured JSON.
         Returns a tuple: (intent, answer_if_question)
         """
-        # Deterministic Heuristic Bypass
-        action_verbs = [
+        # Deterministic Heuristic Bypass — check if any early word is an action verb
+        action_verbs = {
             'open', 'run', 'start', 'click', 'type', 'search', 'delete',
-            'create', 'make', 'do', 'close', 'kill'
-        ]
-        first_word = user_text.strip().split()[0].lower() if user_text.strip() else ""
-        if first_word in action_verbs:
-            logger.debug("Deterministic heuristic bypass matched verb: %s", first_word)
+            'create', 'make', 'do', 'close', 'kill', 'launch', 'execute',
+            'install', 'download', 'navigate', 'go', 'find', 'take',
+        }
+        words = user_text.strip().lower().split()
+        # Check first 3 words (covers "please open", "can you run", etc.)
+        leading_words = words[:3] if len(words) >= 3 else words
+        if any(word in action_verbs for word in leading_words):
+            matched = [w for w in leading_words if w in action_verbs][0]
+            logger.debug("Deterministic heuristic bypass matched verb: %s", matched)
             return "task", None
 
         system_prompt = self._load_prompt("router", key="routing_prompt")
