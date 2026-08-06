@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 Local Multi-Agent Automation Framework
+#  Local Multi-Agent Automation Framework
 
 *An autonomous, privacy-first, multi-agent OS automation engine powered by local LLMs (Ollama) with a rich terminal dashboard and asynchronous REST API.*
 
