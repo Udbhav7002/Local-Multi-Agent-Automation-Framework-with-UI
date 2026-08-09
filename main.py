@@ -13,6 +13,7 @@ import sqlite3
 import platform
 import json
 import urllib.request
+import re
 
 def _hide_dock_icon():
     if sys.platform == 'darwin':
@@ -305,6 +306,21 @@ async def async_main(args: argparse.Namespace) -> None:
     
                 if not user_text:
                     continue
+                
+                # Natural Language Model Swap: "use llama3 for/to check the weather"
+                nlp_model_match = re.match(r'^use\s+([a-zA-Z0-9\.\-:]+)\s+(?:for|to)\s+(.+)$', user_text, re.IGNORECASE)
+                if nlp_model_match:
+                    new_model = nlp_model_match.group(1)
+                    extracted_task = nlp_model_match.group(2).strip()
+                    
+                    console.print(f"  [#888888]Auto-detected model switch to:[/#888888] [bold cyan]{new_model}[/bold cyan]")
+                    _handle_model_command(orchestrator, ["/model", "manager", new_model])
+                    _handle_model_command(orchestrator, ["/model", "worker", new_model])
+                    
+                    user_text = extracted_task
+                    console.print(f"  [#888888]Proceeding with task:[/#888888] {user_text}\n")
+                    
+
                 if user_text.lower() in ['quit', 'exit', '/quit', '/exit', 'stop', '/stop', './stop.sh', 'stop.sh', 'q']:
                     console.print("\n  [#888888]Shutting down cleanly...[/#888888]")
                     if hasattr(orchestrator.step_runner, "executor"):
