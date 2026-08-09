@@ -20,3 +20,4 @@ jobs.db
 screenshots/
 .agents/
 browser_profile/
+venv_new/
