@@ -1,3 +1,4 @@
+version: "1.0.0"
 routing_prompt: |
   You are a routing agent for a local OS controller.
   Classify the user's input as either 'question', 'visual_question', or 'task'.

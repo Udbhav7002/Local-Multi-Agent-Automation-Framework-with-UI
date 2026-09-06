@@ -3,7 +3,9 @@ CLI execution strategy — runs shell commands via asyncio subprocess.
 """
 # pylint: disable=broad-exception-caught
 import asyncio
+import os
 import shlex
+import signal
 from typing import Tuple
 
 SHELL_METACHARACTERS = {'|', ';', '&&', '||', '`', '$(', '>', '>>', '<', '<<'}
@@ -22,34 +24,30 @@ class CLIExecutor:
         return await self._run_command(target)
 
     async def _run_command(self, command: str) -> Tuple[bool, str]:
-        """Executes a native command via subprocess on macOS."""
-        # Pre-filter: reject dangerous metacharacters
-        for meta in SHELL_METACHARACTERS:
-            if meta in command:
-                logger.warning("Blocked command with shell metacharacter '%s': %s", meta, command)
-                return False, f"Command blocked: contains unsafe shell operator '{meta}'"
-        
-        try:
-            parts = shlex.split(command)
-        except ValueError as e:
-            return False, f"Command parsing failed: {e}"
-        
-        if not parts:
+        """Executes a native command via shell on macOS."""
+        if not command.strip():
             return False, "Empty command"
             
         try:
-            logger.debug("Running CLI command: %s", command)
-            process = await asyncio.create_subprocess_exec(
-                *parts,
+            logger.debug("Running CLI command via shell: %s", command)
+            # Use start_new_session=True to create a new process group
+            # so we can kill the entire group on timeout (including child processes)
+            process = await asyncio.create_subprocess_shell(
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(), timeout=config.cli_timeout_seconds
                 )
             except asyncio.TimeoutError:
-                process.kill()
+                # Kill the entire process group to avoid orphaned child processes
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 await process.wait()
                 logger.error(
                     "CLI command timed out after %s seconds: %s",

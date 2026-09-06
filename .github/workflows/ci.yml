@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: pip install ruff
+      - name: Run ruff
+        run: ruff check .
+
+  typecheck:
+    name: Type Check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install mypy
+      - name: Run mypy
+        run: mypy core/ memory/ vision/ api.py plugins/ tools/ main.py tests/
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install pytest-cov hypothesis
+      - name: Run tests
+        run: pytest --cov=core --cov=memory --cov=vision --cov=api --cov-report=term-missing --cov-fail-under=39
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install security tools
+        run: |
+          pip install bandit pip-audit gitleaks
+      - name: Run bandit
+        run: bandit -r core/ memory/ vision/ api.py main.py -f json -o bandit-report.json || true
+      - name: Run pip-audit
+        run: pip-audit --desc || true
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose || true
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t local-multi-agent-framework .
+      - name: Test Docker image runs
+        run: |
+          docker run --rm -d --name test-container -p 8000:8000 local-multi-agent-framework
+          sleep 10
+          curl -f http://localhost:8000/health || (docker logs test-container && exit 1)
+          docker stop test-container
+
+  build-lock:
+    name: Generate Lock File
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        run: pip install uv
+      - name: Generate lock file
+        run: uv pip compile pyproject.toml -o requirements.lock
+      - name: Upload lock file
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirements.lock
+          path: requirements.lock

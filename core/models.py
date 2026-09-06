@@ -4,7 +4,7 @@ Replaces raw dict/string passing with validated dataclasses and enums.
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 
 class ActionType(str, Enum):
@@ -64,45 +64,63 @@ class ActionStep:
     def from_dict(cls, raw: dict) -> "ActionStep":
         """
         Construct an ActionStep from a raw dict (as parsed from Worker JSON).
-        Performs validation and auto-corrects the method field based on the action.
+        Performs strict Pydantic validation and auto-corrects the method field based on the action.
         """
+        from core.schemas import ActionStepPayload
+        from pydantic import ValidationError
+
         raw_action = str(raw.get("action", "unknown")).lower().strip()
         raw_target = str(raw.get("target", ""))
         raw_method = str(raw.get("method", "cli")).lower().strip()
-        expected = str(raw.get("expected_outcome", ""))
 
         # Handle common LLM hallucination: action="browser", target="goto ..."
         if raw_action == "browser" and raw_target.startswith("goto "):
             raw_action = "goto"
             raw_target = raw_target.replace("goto ", "", 1).strip()
+            
+        # Ensure we have a valid method fallback before Pydantic validation
+        try:
+            action_enum = ActionType(raw_action)
+            raw_method = ACTION_TO_METHOD.get(action_enum, MethodType.CLI).value
+        except ValueError:
+            pass
+            
+        raw["action"] = raw_action
+        raw["target"] = raw_target
+        raw["method"] = raw_method
+
+        try:
+            payload = ActionStepPayload.model_validate(raw)
+        except ValidationError as e:
+            from core.logger import setup_logger
+            logger = setup_logger("ActionStep")
+            logger.error("Pydantic validation failed for ActionStep: %s", e)
+            raise ValueError(f"Invalid step format: {e}")
 
         # Parse action, supporting custom plugin actions
         try:
-            action_enum = ActionType(raw_action)
+            action_enum = ActionType(payload.action)
             action: Union[ActionType, str] = action_enum
-            # Force the canonical method based on the action (override LLM mistakes)
-            method: Union[MethodType, str] = ACTION_TO_METHOD.get(action_enum, MethodType.CLI)
+            method: Union[MethodType, str] = MethodType(payload.method)
         except ValueError:
             # Custom plugin action
-            action = raw_action
-            method = raw_method
+            action = payload.action
+            method = payload.method
 
-        undo_raw_action = raw.get("undo_action")
-        undo_target = raw.get("undo_target")
         undo_action = None
-        if undo_raw_action:
+        if payload.undo_action:
             try:
-                undo_action = ActionType(str(undo_raw_action).lower().strip())
+                undo_action = ActionType(payload.undo_action.lower().strip())
             except ValueError:
                 pass
 
         return cls(
             action=action,
-            target=raw_target,
+            target=payload.target,
             method=method,
-            expected_outcome=expected,
+            expected_outcome=payload.expected_outcome,
             undo_action=undo_action,
-            undo_target=undo_target,
+            undo_target=payload.undo_target,
         )
 
     def to_dict(self) -> dict:

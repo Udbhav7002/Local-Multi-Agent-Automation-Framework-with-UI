@@ -5,6 +5,8 @@ from the Orchestrator into a focused, testable class.
 """
 import asyncio
 import json
+import time
+import platform
 from collections import deque
 from typing import Tuple
 
@@ -14,11 +16,26 @@ from core.models import ActionStep
 from core.response_parser import ResponseParser
 from core.safety_gate import SafetyGate
 from core.events import StepExecutedEvent, EventBus
+from core.exceptions import LLMTimeoutError, PlanParsingError, SafetyBlockedError
 
 logger = setup_logger("StepRunner")
 
 # Maximum characters to keep in the action history sliding window
 _MAX_HISTORY_CHARS = 1500
+
+# Dynamic wait times per action type (seconds)
+WAIT_TIMES = {
+    "hotkey": 1,
+    "type": 2,
+    "click": 3,
+    "open_app": 4,
+    "run_command": 2,
+    "goto": 5,
+    "sleep": 0,
+    "close_browser": 2,
+}
+
+_SKIP_OUTCOMES = {"", "unknown", "none", "n/a"}
 
 
 class StepRunner:
@@ -82,8 +99,13 @@ class StepRunner:
                     sub_task, history_str
                 )
                 worker_steps = ResponseParser.parse_worker_output(worker_json)
+            except PlanParsingError as e:
+                logger.error("Worker failed to parse task JSON: %s", e)
+                return False, (
+                    f"Worker Agent output invalid JSON for "
+                    f"sub-task '{sub_task}': {e}"
+                ), steps_executed
             except (ValueError, KeyError) as e:
-                import json
                 logger.error("Worker failed to break down task: %s", e)
                 return False, (
                     f"Worker Agent failed to generate actions for "
@@ -125,204 +147,294 @@ class StepRunner:
         if self._cancelled:
             return False, "Execution cancelled.", 0
 
-        import time
         for attempt in range(config.max_step_retries + 1):
-            if attempt > 0:
-                logger.info(
-                    "Retrying Worker Step %s.%s (Attempt %s/%s)...",
-                    task_idx + 1, step_idx + 1,
-                    attempt + 1, config.max_step_retries + 1
-                )
-            else:
-                logger.info(
-                    "Worker Step %s.%s: [cyan]%s[/cyan] %s (Method: %s)",
-                    task_idx + 1, step_idx + 1,
-                    self._enum_val(step.action),
-                    step.target,
-                    self._enum_val(step.method)
-                )
+            await self._log_step_start(step, task_idx, step_idx, attempt)
 
-            # Safety gate for dangerous CLI commands
-            if self._enum_val(step.method) == "cli" and not self.safety_gate.is_safe(step.target):
-                logger.warning("Dangerous CLI command blocked: %s", step.target)
-                return False, "Dangerous action blocked by safety gate.", 0
-
-            # General safety check
-            if not self.safety_gate.is_safe_action(
-                action=self._enum_val(step.action),
-                target=step.target,
-                method=self._enum_val(step.method)
-            ):
-                approved = await self.safety_gate.request_approval(step.target)
-                if not approved:
-                    logger.warning("Action canceled by user. Aborting task.")
-                    return False, "", 0
+            # Safety check and potential reroute to sandbox
+            await self._check_safety_and_reroute(step)
 
             start_time = time.time()
-            # Execute the step
             success, output = await self.executor.execute_step(step.to_dict())
+            duration_ms = int((time.time() - start_time) * 1000)
 
-            # Record in sliding-window history
-            entry = (
-                f"Action: {self._enum_val(step.action)} | Target: {step.target} | "
-                f"Method: {self._enum_val(step.method)} | Success: {success} | "
-                f"Output: {output[:200]}"
-            )
-            action_history.append(entry)
+            self._record_history(action_history, step, success, output)
 
             if success:
-                logger.info(
-                    "[green]Worker Step %s.%s completed:[/green] %s",
-                    task_idx + 1, step_idx + 1, output
-                )
-
-                # Vision verification if applicable
-                _skip = {"", "unknown", "none", "n/a"}
-                if step.expected_outcome and step.expected_outcome.strip().lower() not in _skip:
-                    v_ok, v_feedback = await self._verify_with_vision(
-                        step, task_idx, step_idx, attempt
-                    )
-                    duration_ms = int((time.time() - start_time) * 1000)
-                    if v_ok:
-                        if step.undo_action and step.undo_target:
-                            self.undo_stack.append(step)
-                        if self.event_bus:
-                            self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=self._enum_val(step.action),
-                                step_target=step.target,
-                                success=True,
-                                message=f"Step succeeded (vision ok): {output}"
-                            ))
-                        return True, "", duration_ms
-                    if v_feedback:
-                        if self.event_bus:
-                            self.event_bus.publish("step_executed", StepExecutedEvent(
-                                step_action=self._enum_val(step.action),
-                                step_target=step.target,
-                                success=False,
-                                message=f"Step failed vision: {v_feedback}"
-                            ))
-                        return False, v_feedback, duration_ms
-                    # v_feedback is empty means retry
-                    continue
-
-                # No expected outcome, step succeeds automatically
-                if step.undo_action and step.undo_target:
-                    self.undo_stack.append(step)
-                
-                if self.event_bus:
-                    self.event_bus.publish("step_executed", StepExecutedEvent(
-                        step_action=self._enum_val(step.action),
-                        step_target=step.target,
-                        success=True,
-                        message=f"Step succeeded: {output}"
-                    ))
-                return True, "", int((time.time() - start_time) * 1000)
-
-            duration_ms = int((time.time() - start_time) * 1000)
-            # Execution failed
-            logger.error(
-                "[red]Worker Step %s.%s failed:[/red] %s",
-                task_idx + 1, step_idx + 1, output
-            )
-            
-            if self.event_bus:
-                self.event_bus.publish("step_executed", StepExecutedEvent(
-                    step_action=self._enum_val(step.action),
-                    step_target=step.target,
-                    success=False,
-                    message=f"Step failed: {output}"
-                ))
-
-            active_app = "Unknown"
-            import platform
-            try:
-                system = platform.system()
-                if system == "Darwin":
-                    proc = await asyncio.create_subprocess_exec(
-                        'osascript', '-e',
-                        'tell application "System Events" to get name of first application process whose frontmost is true',
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                elif system == "Windows":
-                    proc = await asyncio.create_subprocess_exec(
-                        'powershell', '-Command',
-                        '(Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object -First 1).ProcessName',
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                elif system == "Linux":
-                    proc = await asyncio.create_subprocess_exec(
-                        'xdotool', 'getactivewindow', 'getwindowpid',
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                else:
-                    proc = None
-                    
-                if proc:
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-                    if proc.returncode == 0:
-                        active_app = stdout.decode().strip()
-            except asyncio.TimeoutError:
-                logger.debug("Active app check timed out.")
-            except Exception as e:
-                logger.debug("Failed to get active app: %s", e)
-
-            visible_text = "None"
-            if self.verifier.ui_parser:
-                visible_text = self.verifier.ui_parser.extract_all_text()
-                if len(visible_text) > 1000:
-                    visible_text = visible_text[:1000] + "..."
-
-            if attempt < config.max_step_retries:
-                logger.info("Step failed, attempting self-correction...")
-                prompt = (
-                    f"The previous action failed. Here is the error:\n"
-                    f"Action: {self._enum_val(step.action)} | Target: {step.target} | Method: {self._enum_val(step.method)}\n"
-                    f"Error: {output}\n\n"
-                    f"Current Screen State:\n"
-                    f"- Active App: {active_app}\n"
-                    f"- Visible Text: {visible_text}\n\n"
-                    f"Generate a corrected action step to achieve the same goal. Adjust the target or method based on the error."
-                )
-                try:
-                    correction_json = await self.worker.generate_action(prompt, "")
-                    corrected_steps = ResponseParser.parse_worker_output(correction_json)
-                    if corrected_steps:
-                        step = ActionStep.from_dict(corrected_steps[0])
-                        logger.info("Correction applied, retrying with new step: %s %s", self._enum_val(step.action), step.target)
-                except Exception as e:
-                    logger.error("Correction failed, falling back to original step: %s", e)
-                    
-                await asyncio.sleep(2)
+                result = await self._handle_success(step, task_idx, step_idx, attempt, output, duration_ms)
+                if result is not None:
+                    return result
+                # Vision verification returned empty feedback = retry
                 continue
 
-            feedback = (
-                f"\n\n[SYSTEM FEEDBACK]: Worker Step {task_idx + 1}.{step_idx + 1} "
-                f"(`{self._enum_val(step.action)}` `{step.target}`) failed with error: {output}.\n"
-                f"[CURRENT STATE]:\n"
-                f"- Active App: {active_app}\n"
-                f"- Visible Text: {visible_text}\n"
-                f"CRITICAL INSTRUCTION: DO NOT blindly start from scratch. "
-                f"Analyze the failure to understand the current state."
+            # Execution failed
+            result = await self._handle_failure(
+                step, task_idx, step_idx, attempt, output, duration_ms, action_history
             )
-            return False, feedback, duration_ms
+            if result is not None:
+                return result
+            # Retry loop continues
 
         return False, "", 0
 
-    # Dynamic wait times per action type (seconds)
-    WAIT_TIMES = {
-        "hotkey": 1,
-        "type": 2,
-        "click": 3,
-        "open_app": 4,
-        "run_command": 2,
-        "goto": 5,
-        "sleep": 0,
-        "close_browser": 2,
-    }
+    async def _log_step_start(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        attempt: int,
+    ) -> None:
+        """Log the start of a step attempt."""
+        if attempt > 0:
+            logger.info(
+                "Retrying Worker Step %s.%s (Attempt %s/%s)...",
+                task_idx + 1, step_idx + 1,
+                attempt + 1, config.max_step_retries + 1
+            )
+        else:
+            logger.info(
+                "Worker Step %s.%s: [cyan]%s[/cyan] %s (Method: %s)",
+                task_idx + 1, step_idx + 1,
+                self._enum_val(step.action),
+                step.target,
+                self._enum_val(step.method)
+            )
+
+    async def _check_safety_and_reroute(self, step: ActionStep) -> None:
+        """Check safety gate and reroute unsafe CLI commands to sandbox."""
+        if not self.safety_gate.is_safe_action(
+            action=self._enum_val(step.action),
+            target=step.target,
+            method=self._enum_val(step.method)
+        ):
+            if self._enum_val(step.method) == "cli":
+                logger.warning("[yellow]Unsafe CLI command detected. Rerouting to Docker Sandbox...[/yellow]")
+                step.action = "run_sandbox_command"
+            else:
+                approved = await self.safety_gate.request_approval(step.target)
+                if not approved:
+                    logger.warning("Action canceled by user. Aborting task.")
+                    raise SafetyBlockedError(f"Action '{step.target}' was blocked by the user.")
+
+    def _record_history(self, action_history: deque, step: ActionStep, success: bool, output: str) -> None:
+        """Record step execution in sliding-window history."""
+        entry = (
+            f"Action: {self._enum_val(step.action)} | Target: {step.target} | "
+            f"Method: {self._enum_val(step.method)} | Success: {success} | "
+            f"Output: {output[:200]}"
+        )
+        action_history.append(entry)
+
+    async def _handle_success(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        attempt: int,
+        output: str,
+        duration_ms: int,
+    ) -> Tuple[bool, str, int] | None:
+        """
+        Handle successful step execution including vision verification.
+        Returns tuple if complete, None if should retry.
+        """
+        logger.info(
+            "[green]Worker Step %s.%s completed:[/green] %s",
+            task_idx + 1, step_idx + 1, output
+        )
+
+        # Vision verification if applicable
+        if step.expected_outcome and step.expected_outcome.strip().lower() not in _SKIP_OUTCOMES:
+            v_ok, v_feedback = await self._verify_with_vision(step, task_idx, step_idx, attempt)
+            if v_ok:
+                return self._finalize_success(step, task_idx, step_idx, output, duration_ms)
+            if v_feedback:
+                self._publish_step_event(step, task_idx, step_idx, False, f"Step failed vision: {v_feedback}")
+                return False, v_feedback, duration_ms
+            # v_feedback is empty means retry
+            return None
+
+        # No expected outcome, step succeeds automatically
+        return self._finalize_success(step, task_idx, step_idx, output, duration_ms)
+
+    def _finalize_success(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        output: str,
+        duration_ms: int,
+    ) -> Tuple[bool, str, int]:
+        """Finalize a successful step: record undo, publish event, return result."""
+        if step.undo_action and step.undo_target:
+            self.undo_stack.append(step)
+        
+        self._publish_step_event(step, task_idx, step_idx, True, f"Step succeeded: {output}")
+        return True, "", duration_ms
+
+    async def _handle_failure(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        attempt: int,
+        output: str,
+        duration_ms: int,
+        action_history: deque,
+    ) -> Tuple[bool, str, int] | None:
+        """
+        Handle failed step execution: gather state, attempt correction, or return feedback.
+        Returns tuple if complete, None if should retry.
+        """
+        logger.error(
+            "[red]Worker Step %s.%s failed:[/red] %s",
+            task_idx + 1, step_idx + 1, output
+        )
+        
+        self._publish_step_event(step, task_idx, step_idx, False, f"Step failed: {output}")
+
+        active_app = await self._get_active_app()
+        visible_text = await self._get_visible_text()
+
+        if attempt < config.max_step_retries:
+            corrected = await self._attempt_self_correction(
+                step, task_idx, step_idx, output, active_app, visible_text
+            )
+            if corrected:
+                return None  # Retry with corrected step
+            await asyncio.sleep(2)
+            return None
+
+        feedback = self._build_failure_feedback(step, task_idx, step_idx, output, active_app, visible_text)
+        return False, feedback, duration_ms
+
+    async def _get_active_app(self) -> str:
+        """Detect the currently active application (OS-specific)."""
+        active_app = "Unknown"
+        try:
+            system = platform.system()
+            if system == "Darwin":
+                proc = await asyncio.create_subprocess_exec(
+                    'osascript', '-e',
+                    'tell application "System Events" to get name of first application process whose frontmost is true',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            elif system == "Windows":
+                proc = await asyncio.create_subprocess_exec(
+                    'powershell', '-Command',
+                    '(Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object -First 1).ProcessName',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            elif system == "Linux":
+                proc = await asyncio.create_subprocess_exec(
+                    'xdotool', 'getactivewindow', 'getwindowpid',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+            else:
+                proc = None
+                
+            if proc:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                if proc.returncode == 0:
+                    active_app = stdout.decode().strip()
+        except asyncio.TimeoutError:
+            logger.debug("Active app check timed out.")
+        except OSError as e:
+            logger.debug("Failed to get active app due to OS error: %s", e)
+        except Exception as e:
+            logger.debug("Failed to get active app: %s", e)
+        
+        return active_app
+
+    async def _get_visible_text(self) -> str:
+        """Extract visible text from screen via OCR."""
+        visible_text = "None"
+        if self.verifier.ui_parser:
+            visible_text = await asyncio.to_thread(self.verifier.ui_parser.extract_all_text)
+            if len(visible_text) > 1000:
+                visible_text = visible_text[:1000] + "..."
+        return visible_text
+
+    async def _attempt_self_correction(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        output: str,
+        active_app: str,
+        visible_text: str,
+    ) -> bool:
+        """
+        Attempt to self-correct a failed step by asking the Worker for a corrected action.
+        Returns True if correction was applied, False otherwise.
+        """
+        logger.info("Step failed, attempting self-correction...")
+        prompt = (
+            f"The previous action failed. Here is the error:\n"
+            f"Action: {self._enum_val(step.action)} | Target: {step.target} | Method: {self._enum_val(step.method)}\n"
+            f"Error: {output}\n\n"
+            f"Current Screen State:\n"
+            f"- Active App: {active_app}\n"
+            f"- Visible Text: {visible_text}\n\n"
+            f"Generate a corrected action step to achieve the same goal. Adjust the target or method based on the error."
+        )
+        try:
+            correction_json = await self.worker.generate_action(prompt, "")
+            corrected_steps = ResponseParser.parse_worker_output(correction_json)
+            if corrected_steps:
+                # Replace the step with the corrected version
+                step.__dict__.update(ActionStep.from_dict(corrected_steps[0]).__dict__)
+                logger.info("Correction applied, retrying with new step: %s %s", self._enum_val(step.action), step.target)
+                return True
+        except LLMTimeoutError as e:
+            logger.error("Correction failed due to LLM timeout: %s", e)
+        except PlanParsingError as e:
+            logger.error("Correction failed due to bad JSON: %s", e)
+        except OSError as e:
+            logger.error("Correction failed due to OS error: %s", e)
+        except Exception as e:
+            logger.error("Correction failed, falling back to original step: %s", e)
+        
+        return False
+
+    def _build_failure_feedback(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        output: str,
+        active_app: str,
+        visible_text: str,
+    ) -> str:
+        """Build the feedback message for a failed step after all retries exhausted."""
+        return (
+            f"\n\n[SYSTEM FEEDBACK]: Worker Step {task_idx + 1}.{step_idx + 1} "
+            f"(`{self._enum_val(step.action)}` `{step.target}`) failed with error: {output}.\n"
+            f"[CURRENT STATE]:\n"
+            f"- Active App: {active_app}\n"
+            f"- Visible Text: {visible_text}\n"
+            f"CRITICAL INSTRUCTION: DO NOT blindly start from scratch. "
+            f"Analyze the failure to understand the current state."
+        )
+
+    def _publish_step_event(
+        self,
+        step: ActionStep,
+        task_idx: int,
+        step_idx: int,
+        success: bool,
+        message: str,
+    ) -> None:
+        """Publish step execution event to event bus."""
+        if self.event_bus:
+            self.event_bus.publish("step_executed", StepExecutedEvent(
+                step_action=self._enum_val(step.action),
+                step_target=step.target,
+                success=success,
+                message=message
+            ))
 
     async def _verify_with_vision(
         self,
@@ -338,7 +450,7 @@ class StepRunner:
         """
         # Use dynamic wait time based on the action type
         action_val = self._enum_val(step.action)
-        wait = self.WAIT_TIMES.get(action_val, 4)  # type: ignore[attr-defined]
+        wait = WAIT_TIMES.get(action_val, 4)
         if wait > 0:
             logger.info("Waiting for UI to render before taking screenshot (%ds)...", wait)
             await asyncio.sleep(wait)
@@ -394,6 +506,15 @@ class StepRunner:
             action_val = self._enum_val(step.action)
             undo_action_val = self._enum_val(step.undo_action)
             logger.info("Reversing action: %s %s -> %s %s", action_val, step.target, undo_action_val, step.undo_target)
+            
+            # Safety check for the undo action
+            if not self.safety_gate.is_safe_action(
+                action=self._enum_val(step.undo_action),
+                target=step.undo_target,
+                method=self._enum_val(step.method)
+            ):
+                logger.warning("Rollback action blocked by safety gate: %s %s", undo_action_val, step.undo_target)
+                continue
             
             # Create a reverse step
             reverse_step = ActionStep(

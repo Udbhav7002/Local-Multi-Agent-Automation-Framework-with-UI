@@ -1,8 +1,10 @@
 {
     "apps_used": {
         "Safari": 3,
-        "Brave Browser": 4,
-        "Terminal": 1
+        "Brave Browser": 6,
+        "Terminal": 3,
+        "Finder": 2,
+        "Mail": 3
     },
-    "last_updated": "2026-08-04T20:12:11.763665"
+    "last_updated": "2026-08-09T19:58:15.207504"
 }

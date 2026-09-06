@@ -3,7 +3,8 @@ Memory module for storing and retrieving successful and failed plans using Chrom
 """
 import os
 import uuid
-from typing import Optional
+import asyncio
+from typing import Optional, List, Dict, Any
 
 import chromadb
 
@@ -37,8 +38,7 @@ class ChromaStore:
         self.episodes_collection = self.client.get_or_create_collection(
             name="episodes")
 
-    def get_plan(self, task_description: str) -> Optional[str]:
-        """Query ChromaDB for an exact or highly similar task."""
+    def _sync_get_plan(self, task_description: str) -> Optional[str]:
         try:
             results = self.success_collection.query(
                 query_texts=[task_description],
@@ -46,19 +46,20 @@ class ChromaStore:
             )
             if results and results.get('documents') and len(
                     results['documents'][0]) > 0:
-                # Check distance to ensure high confidence
                 distance = results['distances'][0][0]
                 if distance < config.memory_success_threshold:
-                    logger.debug(
-                        "Found cached plan with distance: %s", distance)
+                    logger.debug("Found cached plan with distance: %s", distance)
                     return str(results['documents'][0][0])
             return None
         except (ValueError, OSError) as e:
             logger.error("Error querying success collection: %s", e)
             return None
 
-    def save_plan(self, task_description: str, plan_json: str) -> None:
-        """Save a successful plan to ChromaDB using UUIDs."""
+    async def get_plan(self, task_description: str) -> Optional[str]:
+        """Query ChromaDB for an exact or highly similar task."""
+        return await asyncio.to_thread(self._sync_get_plan, task_description)
+
+    def _sync_save_plan(self, task_description: str, plan_json: str) -> None:
         try:
             doc_id = str(uuid.uuid4())
             self.success_collection.add(
@@ -66,38 +67,37 @@ class ChromaStore:
                 metadatas=[{"task": task_description}],
                 ids=[doc_id]
             )
-            logger.debug(
-                "Successfully saved plan to ChromaStore with ID: %s", doc_id)
+            logger.debug("Successfully saved plan to ChromaStore with ID: %s", doc_id)
         except (ValueError, OSError) as e:
             logger.error("Error saving to success collection: %s", e)
 
-    def get_failures(self, task_description: str) -> list:
-        """Get past failed strategies for a similar task."""
+    async def save_plan(self, task_description: str, plan_json: str) -> None:
+        """Save a successful plan to ChromaDB using UUIDs."""
+        await asyncio.to_thread(self._sync_save_plan, task_description, plan_json)
+
+    def _sync_get_failures(self, task_description: str) -> list:
         try:
             results = self.failure_collection.query(
                 query_texts=[task_description],
                 n_results=3
             )
             failures = []
-            if results and results.get('documents') and len(
-                    results['documents']) > 0:
+            if results and results.get('documents') and len(results['documents']) > 0:
                 for idx, doc in enumerate(results['documents'][0]):
                     distance = results['distances'][0][idx]
                     if distance < config.memory_failure_threshold:
-                        reason = results['metadatas'][0][idx].get(
-                            'reason', 'Unknown reason')
+                        reason = results['metadatas'][0][idx].get('reason', 'Unknown reason')
                         failures.append({'plan': doc, 'reason': reason})
             return failures
         except (ValueError, OSError) as e:
             logger.error("Error querying failure collection: %s", e)
             return []
 
-    def save_failure(
-            self,
-            task_description: str,
-            failed_plan: str,
-            reason: str) -> None:
-        """Save a failed plan to ChromaDB."""
+    async def get_failures(self, task_description: str) -> list:
+        """Get past failed strategies for a similar task."""
+        return await asyncio.to_thread(self._sync_get_failures, task_description)
+
+    def _sync_save_failure(self, task_description: str, failed_plan: str, reason: str) -> None:
         try:
             doc_id = str(uuid.uuid4())
             self.failure_collection.add(
@@ -105,13 +105,15 @@ class ChromaStore:
                 metadatas=[{"task": task_description, "reason": reason}],
                 ids=[doc_id]
             )
-            logger.info(
-                "Logged failed plan to Reflection Memory to prevent future recurrence.")
+            logger.info("Logged failed plan to Reflection Memory to prevent future recurrence.")
         except (ValueError, OSError) as e:
             logger.error("Error saving to failure collection: %s", e)
 
-    def save_episode(self, episode_data: dict) -> None:
-        """Store a complete execution trace (episode)."""
+    async def save_failure(self, task_description: str, failed_plan: str, reason: str) -> None:
+        """Save a failed plan to ChromaDB."""
+        await asyncio.to_thread(self._sync_save_failure, task_description, failed_plan, reason)
+
+    def _sync_save_episode(self, episode_data: dict) -> None:
         import json
         try:
             doc_id = str(uuid.uuid4())
@@ -125,8 +127,11 @@ class ChromaStore:
         except Exception as e:
             logger.error("Error saving episode: %s", e)
 
-    def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
-        """Retrieve similar past episodes."""
+    async def save_episode(self, episode_data: dict) -> None:
+        """Store a complete execution trace (episode)."""
+        await asyncio.to_thread(self._sync_save_episode, episode_data)
+
+    def _sync_get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
         import json
         try:
             results = self.episodes_collection.query(
@@ -149,18 +154,43 @@ class ChromaStore:
             logger.error("Error querying episodes: %s", e)
             return []
 
-    def close(self) -> None:
+    async def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
+        """Retrieve similar past episodes."""
+        return await asyncio.to_thread(self._sync_get_similar_episodes, task_description, limit)
+
+    def _sync_summarize_old_episodes(self, max_episodes: int = 100) -> int:
+        try:
+            results = self.episodes_collection.get()
+            if not results or not results.get('ids'):
+                return 0
+                
+            ids = results['ids']
+            if len(ids) <= max_episodes:
+                return 0
+                
+            # Prune older episodes (insertion order)
+            excess = len(ids) - max_episodes
+            ids_to_delete = ids[:excess]
+            
+            self.episodes_collection.delete(ids=ids_to_delete)
+            logger.info("Summarized/Pruned %d old episodes from ChromaDB to maintain speed.", len(ids_to_delete))
+            return len(ids_to_delete)
+        except Exception as e:
+            logger.error("Error summarizing episodes: %s", e)
+            return 0
+            
+    async def summarize_old_episodes(self, max_episodes: int = 100) -> int:
+        """Run a background job to summarize and prune old episodic memories."""
+        return await asyncio.to_thread(self._sync_summarize_old_episodes, max_episodes)
+
+    async def close(self) -> None:
         """Gracefully release the ChromaDB connection."""
         try:
             logger.debug("Closing ChromaStore...")
-            # PersistentClient auto-persists on write operations.
-            # Explicitly clear references to release SQLite file locks
-            # and trigger garbage collection of database connections.
             self.success_collection = None
             self.failure_collection = None
             self.episodes_collection = None
             if self.client is not None:
-                # Force garbage collection of the underlying SQLite connection
                 del self.client
                 self.client = None
             logger.debug("ChromaStore closed successfully.")

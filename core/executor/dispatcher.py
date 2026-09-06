@@ -7,6 +7,7 @@ import asyncio
 import importlib.util
 import inspect
 import os
+import platform
 import traceback
 from typing import Any, Dict, Tuple, Union
 
@@ -55,16 +56,34 @@ class SystemExecutor:
 
             logger.info("Opening application: %s...", app_name)
             
-            import platform
             system = platform.system()
-            if system == "Darwin":
-                cmd = f'open -a "{app_name}"'
-            elif system == "Windows":
-                cmd = f'start "" "{app_name}"'
-            else: # Linux
-                cmd = f'gtk-launch "{app_name}" || xdg-open "{app_name}"'
+            try:
+                if system == "Darwin":
+                    proc = await asyncio.create_subprocess_exec(
+                        "open", "-a", app_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                elif system == "Windows":
+                    proc = await asyncio.create_subprocess_exec(
+                        "cmd", "/c", "start", "", app_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                else:  # Linux
+                    proc = await asyncio.create_subprocess_exec(
+                        "sh", "-c", f'gtk-launch "{app_name}" || xdg-open "{app_name}"',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
                 
-            return await self._cli.execute("run_command", cmd)
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    return True, f"Opened application: {app_name}"
+                else:
+                    return False, f"Failed to open {app_name}: {stderr.decode().strip()}"
+            except Exception as e:
+                return False, f"Error opening application: {e}"
 
         error_msg = f"Unknown system action: {action}"
         logger.warning(error_msg)

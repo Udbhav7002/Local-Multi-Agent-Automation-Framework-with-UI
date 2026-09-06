@@ -5,6 +5,7 @@ from core.config import config
 from core.logger import setup_logger
 from core.response_parser import ResponseParser
 from core.protocols import TaskPlanner
+from core.telemetry import trace_latency
 from core.events import SystemEvent, EventBus
 from core.prompt_loader import PromptLoader
 from core.base_agent import BaseAgent
@@ -25,6 +26,7 @@ class Planner(BaseAgent, TaskPlanner):
     async def __call__(self, task_description: str) -> str:
         return await self.generate_plan(task_description)
 
+    @trace_latency("Planner.generate_plan")
     async def generate_plan(self, task_description: str) -> str:
         """
         Takes a task and outputs a strict JSON array of high-level sub-tasks.

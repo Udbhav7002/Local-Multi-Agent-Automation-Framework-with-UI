@@ -3,8 +3,12 @@ Critic module for evaluating proposed execution plans.
 Ensures safety, logic, and adherence to rules before execution.
 """
 import json
+import asyncio
 from typing import Tuple, Optional
+from core.exceptions import LLMTimeoutError
+from core.circuit_breaker import CircuitBreakerOpenError
 from core.protocols import TaskCritic
+from core.telemetry import trace_latency
 from core.events import SystemEvent, EventBus
 from core.logger import setup_logger
 from core.prompt_loader import PromptLoader
@@ -23,6 +27,7 @@ class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
     async def __call__(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
         return await self.verify_plan(user_task, plan_json)
 
+    @trace_latency("Critic.verify_plan")
     async def verify_plan(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
         """
         Evaluates a proposed JSON plan against the user's task.
@@ -69,6 +74,9 @@ class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
                 logger.error("Critic output invalid JSON: %s", content)
                 return False, f"Critic failed to output valid JSON: {content}"
 
+        except (LLMTimeoutError, CircuitBreakerOpenError, asyncio.CancelledError):
+            # Re-raise critical errors that should not be treated as "plan rejected"
+            raise
         except Exception as e:
             logger.error("Critic evaluation failed: %s", e)
             return False, f"Critic encountered an error: {e}"

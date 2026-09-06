@@ -25,7 +25,7 @@ class SafetyGate:
         # Keep this list highly restricted to read-only or harmless actions.
         self.allowed_base_commands: Set[str] = {
             "ls", "echo", "pwd", "whoami", "date", "cat", "git status",
-            "dir", "systeminfo" # Added a few Windows equivalents 
+            "dir", "systeminfo", "mkdir", "touch"
         }
 
     # Blocked URL schemes for browser safety
@@ -59,6 +59,12 @@ class SafetyGate:
                 return False
             
             base_binary = parts[0].lower()
+            
+            # Explicitly block all script interpreters
+            blocked = {"python3", "python", "bash", "sh", "zsh", "ruby", "node", "perl"}
+            if base_binary in blocked:
+                logger.warning(f"Blocked explicitly forbidden interpreter: {base_binary}")
+                return False
             
             # Identify chained commands or file redirections.
             # If the agent tries to pipe output or chain commands, force a manual review.

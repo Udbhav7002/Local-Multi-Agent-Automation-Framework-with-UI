@@ -15,9 +15,12 @@ all_code.txt
 Screenshot*.png
 .claude/settings.local.json
 logs/
+skills/
 skills_library/
 jobs.db
 screenshots/
 .agents/
 browser_profile/
 venv_new/
+.api.pid
+api_server.log

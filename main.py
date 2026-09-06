@@ -88,7 +88,8 @@ def draw_splash_screen(router_model: str, planner_model: str, vision_model: str)
     models_table.add_column("Model Name", style="bold green")
     models_table.add_row("🧠 Manager", planner_model)
     models_table.add_row("⚡ Worker", config.worker_model)
-    models_table.add_row("👁 Vision", vision_model)
+    models_table.add_row("👀 Vision", vision_model)
+    models_table.add_row("🧐 Critic", config.critic_model)
 
     # Right table: Slash Commands
     commands_table = Table(title="⚡ Quick Commands", box=box.ROUNDED, border_style="blue", padding=(0, 2))
@@ -150,6 +151,7 @@ def _show_status(orchestrator: Orchestrator) -> None:
     table.add_row("Manager Model", f"[cyan]{orchestrator.planner.model_name}[/cyan]")
     table.add_row("Worker Model", f"[cyan]{orchestrator.worker.model_name}[/cyan]")
     table.add_row("Vision Model", f"[cyan]{config.vision_model}[/cyan]")
+    table.add_row("Critic Model", f"[cyan]{orchestrator.critic.model_name}[/cyan]")
     table.add_row("SQLite Job Tracker", f"{total_jobs} total jobs ({completed_jobs} completed, {failed_jobs} failed)")
     table.add_row("Session History", f"{len(orchestrator._conversation_history)} tasks in current session")
 
@@ -241,8 +243,9 @@ def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
         table.add_row("Manager", orchestrator.planner.model_name)
         table.add_row("Worker", orchestrator.worker.model_name)
         table.add_row("Vision", config.vision_model)
+        table.add_row("Critic", orchestrator.critic.model_name)
         console.print(table)
-        console.print("  [#888888]Usage: /model [manager|worker|vision] [new_model][/#888888]\n")
+        console.print("  [#888888]Usage: /model [manager|worker|vision|critic] [new_model][/#888888]\n")
     elif len(parts) >= 3:
         target_agent = parts[1].lower()
         new_model = parts[2]
@@ -263,10 +266,15 @@ def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
             config.vision_model = new_model
             config.save()
             console.print(f"  [#00ff00]✓[/#00ff00] [#888888]Vision model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
+        elif target_agent == 'critic':
+            orchestrator.critic.model_name = new_model
+            config.critic_model = new_model
+            config.save()
+            console.print(f"  [#00ff00]✓[/#00ff00] [#888888]Critic model changed to[/#888888] [bold #ffffff]{new_model}[/bold #ffffff]")
         else:
-            console.print("  [#ff0000]x Invalid agent. Use manager, worker, or vision.[/#ff0000]")
+            console.print("  [#ff0000]x Invalid agent. Use manager, worker, vision, or critic.[/#ff0000]")
     else:
-        console.print("  [#ff0000]x Usage: /model [manager|worker|vision] [new_model][/#ff0000]")
+        console.print("  [#ff0000]x Usage: /model [manager|worker|vision|critic] [new_model][/#ff0000]")
 
 
 async def async_main(args: argparse.Namespace) -> None:
@@ -308,18 +316,47 @@ async def async_main(args: argparse.Namespace) -> None:
                     continue
                 
                 # Natural Language Model Swap: "use llama3 for/to check the weather"
-                nlp_model_match = re.match(r'^use\s+([a-zA-Z0-9\.\-:]+)\s+(?:for|to)\s+(.+)$', user_text, re.IGNORECASE)
+                nlp_model_match = re.match(r'^(?:use|change(?: model)? to)\s+(?:this\s+)?(?:model\s+)?([a-zA-Z0-9\.\-:]+)(?:\s+(?:for|to)\s+(.+))?$', user_text, re.IGNORECASE)
                 if nlp_model_match:
                     new_model = nlp_model_match.group(1)
-                    extracted_task = nlp_model_match.group(2).strip()
+                    extracted_task = nlp_model_match.group(2).strip() if nlp_model_match.group(2) else ""
                     
-                    console.print(f"  [#888888]Auto-detected model switch to:[/#888888] [bold cyan]{new_model}[/bold cyan]")
-                    _handle_model_command(orchestrator, ["/model", "manager", new_model])
-                    _handle_model_command(orchestrator, ["/model", "worker", new_model])
+                    console.clear()
                     
-                    user_text = extracted_task
-                    console.print(f"  [#888888]Proceeding with task:[/#888888] {user_text}\n")
-                    
+                    if extracted_task.lower() in ["manager and worker", "manager", "worker", "vision", "critic", "all"]:
+                        if "manager" in extracted_task.lower() or "all" in extracted_task.lower():
+                            orchestrator.router.model_name = new_model
+                            orchestrator.planner.model_name = new_model
+                            config.manager_model = new_model
+                        if "worker" in extracted_task.lower() or "all" in extracted_task.lower():
+                            orchestrator.worker.model_name = new_model
+                            config.worker_model = new_model
+                        if "vision" in extracted_task.lower() or "all" in extracted_task.lower():
+                            config.vision_model = new_model
+                        if "critic" in extracted_task.lower() or "all" in extracted_task.lower():
+                            orchestrator.critic.model_name = new_model
+                            config.critic_model = new_model
+                        config.save()
+                        draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
+                        console.print(f"\n  [#00ff00]✓[/#00ff00] [#888888]Auto-switched models to:[/#888888] [bold cyan]{new_model}[/bold cyan]")
+                        continue
+                    else:
+                        orchestrator.router.model_name = new_model
+                        orchestrator.planner.model_name = new_model
+                        orchestrator.critic.model_name = new_model
+                        config.manager_model = new_model
+                        orchestrator.worker.model_name = new_model
+                        config.worker_model = new_model
+                        config.save()
+                        
+                        draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
+                        console.print(f"\n  [#00ff00]✓[/#00ff00] [#888888]Auto-switched models to:[/#888888] [bold cyan]{new_model}[/bold cyan]")
+                        
+                        if extracted_task:
+                            user_text = extracted_task
+                            console.print(f"  [#888888]Proceeding with task:[/#888888] {user_text}\n")
+                        else:
+                            continue
 
                 if user_text.lower() in ['quit', 'exit', '/quit', '/exit', 'stop', '/stop', './stop.sh', 'stop.sh', 'q']:
                     console.print("\n  [#888888]Shutting down cleanly...[/#888888]")
@@ -377,7 +414,7 @@ async def async_main(args: argparse.Namespace) -> None:
     
                 if user_text.lower() == '/voice':
                     voice_input = VoiceInput()
-                    user_text = voice_input.listen()
+                    user_text = await asyncio.to_thread(voice_input.listen)
                     if not user_text:
                         continue
                     console.print(f"  [bold white]You said:[/bold white] {user_text}")

@@ -3,98 +3,81 @@ Configuration module for the Local Multi-Agent Automation Framework.
 """
 # Configuration Precedence (highest to lowest):
 # 1. settings.json (runtime-persisted via Config.save())
-# 2. Environment variables
-# 3. Dataclass defaults below
+# 2. Environment variables (or .env file)
+# 3. Pydantic Defaults below
 import os
 import json
 import platform
-from dataclasses import dataclass, field
+import logging
+from typing import Dict, Any
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("Config")
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
 
-import logging
-logger = logging.getLogger("Config")
-
-def _get_env_int(key: str, default: int) -> int:
-    val = os.getenv(key)
-    if val is not None:
-        try:
-            return int(val)
-        except ValueError:
-            logger.warning(f"Invalid integer for {key}: '{val}'. Using default: {default}")
-    return default
-
-def _get_env_float(key: str, default: float) -> float:
-    val = os.getenv(key)
-    if val is not None:
-        try:
-            return float(val)
-        except ValueError:
-            logger.warning(f"Invalid float for {key}: '{val}'. Using default: {default}")
-    return default
-
-@dataclass
-class Config:
+class Config(BaseSettings):
     """Central configuration for the framework."""
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
     # Models
-    manager_model: str = os.getenv("MANAGER_MODEL", "llama3:latest")    # Planner model
-    worker_model: str = os.getenv("WORKER_MODEL", "llama3:latest")      # Fast local model
-    vision_model: str = os.getenv("VISION_MODEL", "llava:latest")
+    manager_model: str = "qwen3-coder:30b"
+    worker_model: str = "qwen2.5-coder:14b"
+    vision_model: str = "qwen2.5vl:7b"
+    critic_model: str = "llama3.2:3b"
 
     # Retry logic
-    max_plan_regenerations: int = _get_env_int("MAX_PLAN_REGENERATIONS", 3)
-    max_step_retries: int = _get_env_int("MAX_STEP_RETRIES", 1)
+    max_plan_regenerations: int = 3
+    max_step_retries: int = 1
 
     # Behavior
-    auto_continue: bool = os.getenv(
-        "AUTO_CONTINUE", "False").strip().lower() in (
-        "true", "1", "yes", "y")
+    auto_continue: bool = False
 
     # Vision verification
-    vision_auto_continue_on_uncertain: bool = os.getenv(
-        "VISION_AUTO_CONTINUE", "False").strip().lower() in (
-        "true", "1", "yes", "y")
+    vision_auto_continue_on_uncertain: bool = False
 
     # API endpoints
-    ollama_base_url: str = os.getenv(
-        "OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_base_url: str = "http://localhost:11434"
 
     # Context window
-    num_ctx: int = _get_env_int("NUM_CTX", 8192)
+    num_ctx: int = 8192
 
     # Memory settings
-    memory_success_threshold: float = _get_env_float("MEMORY_SUCCESS_THRESHOLD", 0.15)
-    memory_failure_threshold: float = _get_env_float("MEMORY_FAILURE_THRESHOLD", 0.2)
-    memory_episode_threshold: float = _get_env_float("MEMORY_EPISODE_THRESHOLD", 0.25)
+    memory_success_threshold: float = 0.15
+    memory_failure_threshold: float = 0.2
+    memory_episode_threshold: float = 0.25
 
     # File paths
-    screenshots_dir: str = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "screenshots"
+    screenshots_dir: str = Field(
+        default_factory=lambda: os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "screenshots"
+        )
     )
+    screenshot_retention_days: int = 7
 
     # Execution limits
-    cli_timeout_seconds: float = _get_env_float("CLI_TIMEOUT", 60.0)
-    cli_max_output_chars: int = _get_env_int("CLI_MAX_OUTPUT", 2000)
+    cli_timeout_seconds: float = 60.0
+    cli_max_output_chars: int = 2000
     
-    # Specific action timeouts (override cli_timeout_seconds for non-CLI actions).
-    # action_timeouts['run_command'] inherits from cli_timeout_seconds by default.
-    action_timeouts: dict[str, float] = field(default_factory=lambda: {
-        "run_command": _get_env_float("CLI_TIMEOUT", 60.0),
+    action_timeouts: Dict[str, float] = Field(default_factory=lambda: {
+        "run_command": 60.0,
         "open_app": 10.0,
         "click": 15.0,
         "type": 15.0,
         "hotkey": 5.0,
-        "sleep": 300.0, # allow up to 5 min sleep
+        "sleep": 300.0,
         "goto": 30.0,
         "close_browser": 10.0
     })
 
     # LLM safety
-    llm_timeout_seconds: float = _get_env_float("LLM_TIMEOUT", 120.0)
-    max_prompt_chars: int = _get_env_int("MAX_PROMPT_CHARS", 24000)
+    llm_timeout_seconds: float = 120.0
+    max_prompt_chars: int = 24000
 
     # Sandbox
-    sandbox_root: str = os.getenv("SANDBOX_ROOT", "")  # Empty = unrestricted
+    sandbox_root: str = ""
 
     @property
     def os_context(self) -> str:
@@ -127,33 +110,27 @@ class Config:
         else:
             return f"You are running on {system} ({machine})."
 
-    def __post_init__(self):
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
         os.makedirs(self.screenshots_dir, exist_ok=True)
-        max_allowed_ctx = _get_env_int("MAX_ALLOWED_CTX", 32768)
-        if self.num_ctx > max_allowed_ctx:
-            raise ValueError(f"Requested NUM_CTX ({self.num_ctx}) exceeds MAX_ALLOWED_CTX ({max_allowed_ctx}).")
 
+        # Load from settings.json (highest precedence for runtime overrides)
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if "manager_model" in data:
-                    self.manager_model = data["manager_model"]
-                if "worker_model" in data:
-                    self.worker_model = data["worker_model"]
-                if "vision_model" in data:
-                    self.vision_model = data["vision_model"]
-                if "num_ctx" in data:
-                    self.num_ctx = data["num_ctx"]
-                for key in ('max_plan_regenerations', 'max_step_retries', 'cli_timeout_seconds',
-                            'llm_timeout_seconds', 'memory_success_threshold',
-                            'memory_failure_threshold', 'memory_episode_threshold'):
-                    if key in data:
-                        setattr(self, key, type(getattr(self, key))(data[key]))
+                for k, v in data.items():
+                    if hasattr(self, k):
+                        setattr(self, k, v)
             except Exception as e:
-                print(f"Error loading settings: {e}")
+                logger.warning(f"Error loading settings.json: {e}")
 
-    def save(self):
+        # Validate num_ctx after all overrides are applied
+        max_allowed_ctx = int(os.getenv("MAX_ALLOWED_CTX", 32768))
+        if self.num_ctx > max_allowed_ctx:
+            raise ValueError(f"Requested NUM_CTX ({self.num_ctx}) exceeds MAX_ALLOWED_CTX ({max_allowed_ctx}).")
+
+    def save(self) -> None:
         """Persist all runtime-configurable settings to disk."""
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -161,16 +138,25 @@ class Config:
                     "manager_model": self.manager_model,
                     "worker_model": self.worker_model,
                     "vision_model": self.vision_model,
+                    "critic_model": self.critic_model,
                     "num_ctx": self.num_ctx,
                     "max_plan_regenerations": self.max_plan_regenerations,
                     "max_step_retries": self.max_step_retries,
                     "cli_timeout_seconds": self.cli_timeout_seconds,
+                    "cli_max_output_chars": self.cli_max_output_chars,
                     "llm_timeout_seconds": self.llm_timeout_seconds,
+                    "max_prompt_chars": self.max_prompt_chars,
                     "memory_success_threshold": self.memory_success_threshold,
                     "memory_failure_threshold": self.memory_failure_threshold,
                     "memory_episode_threshold": self.memory_episode_threshold,
+                    "screenshot_retention_days": self.screenshot_retention_days,
+                    "auto_continue": self.auto_continue,
+                    "vision_auto_continue_on_uncertain": self.vision_auto_continue_on_uncertain,
+                    "ollama_base_url": self.ollama_base_url,
+                    "action_timeouts": self.action_timeouts,
+                    "sandbox_root": self.sandbox_root,
                 }, f, indent=4)
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            logger.error(f"Error saving settings: {e}")
 
 config = Config()

@@ -53,11 +53,12 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         Takes a screenshot and asks the model if the outcome was achieved.
         """
         logger.info("Capturing screen to verify: '%s'...", expected_outcome)
-        screenshot_path = self.screen_cap.capture_fullscreen(
-            "current_state.png")
+        screenshot_path = await asyncio.to_thread(
+            self.screen_cap.capture_fullscreen, "current_state.png")
 
         # FAST PATH: Instant OCR Verification
-        ocr_success, ocr_msg = self._fast_ocr_verify(screenshot_path, expected_outcome, target_text, action)
+        ocr_success, ocr_msg = await asyncio.to_thread(
+            self._fast_ocr_verify, screenshot_path, expected_outcome, target_text, action)
         if ocr_success:
             return True, ocr_msg
 
@@ -127,7 +128,8 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         Takes a screenshot and asks the vision model an arbitrary question.
         """
         logger.info("Capturing screen to answer question...")
-        screenshot_path = self.screen_cap.capture_fullscreen("question_state.png")
+        screenshot_path = await asyncio.to_thread(
+            self.screen_cap.capture_fullscreen, "question_state.png")
 
         prompt = (
             f"You are an AI assistant looking at the user's screen. "

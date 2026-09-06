@@ -3,7 +3,7 @@ Router module for evaluating the intent of a user prompt.
 Determines whether the user is asking a question or issuing a task command.
 """
 import json
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, AsyncGenerator
 
 from core.logger import setup_logger
 from core.config import config
@@ -25,7 +25,7 @@ class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
     async def __call__(self, user_text: str) -> Tuple[str, Optional[str]]:
         return await self.classify(user_text)
 
-    async def classify(self, user_text: str) -> Tuple[str, Optional[str]]:
+    async def classify(self, user_text: str) -> Tuple[str, Optional[Any]]:
         """
         Classifies user text as either 'question' or 'task' using structured JSON.
         Returns a tuple: (intent, answer_if_question)
@@ -76,14 +76,14 @@ class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
             
             chat_system_prompt = self._load_prompt("router", key="chat_prompt")
             
-            answer = await self.llm.chat(
+            answer_stream = self.llm.stream_chat(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": chat_system_prompt},
                     {"role": "user", "content": user_text}
                 ],
             )
-            return "question", answer
+            return "question", answer_stream
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.error("Router failed to classify intent: %s", e)

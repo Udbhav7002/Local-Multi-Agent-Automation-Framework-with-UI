@@ -22,6 +22,7 @@ class PlanningContext:
     os_context: str = ""
     conversation_history: list[dict] = field(default_factory=list)
     available_agents: str = ""
+    agent_skills: str = ""
     past_failures: list[dict] = field(default_factory=list)
     system_feedback: list[str] = field(default_factory=list)
 
@@ -52,6 +53,11 @@ class PlanningContext:
         if self.available_agents:
             sections.append(
                 f"\n\n[AVAILABLE AGENTS]: {self.available_agents}"
+            )
+
+        if self.agent_skills:
+            sections.append(
+                f"\n\n{self.agent_skills}"
             )
 
         if self.conversation_history:

@@ -2,7 +2,6 @@
 Event Bus module for decoupled communication between components.
 Implements the Observer pattern.
 """
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Any
@@ -21,6 +20,14 @@ class SystemEvent:
 class TaskStartedEvent(SystemEvent):
     """Fired when a new user task begins processing."""
     task_description: str = ""
+    job_id: str = ""
+
+@dataclass
+class TaskStateChangedEvent(SystemEvent):
+    """Fired when the task state changes (e.g., PLANNING -> EXECUTING)."""
+    task_description: str = ""
+    job_id: str = ""
+    new_state: str = ""
 
 @dataclass
 class StepExecutedEvent(SystemEvent):
@@ -36,6 +43,7 @@ class TaskCompletedEvent(SystemEvent):
     task_description: str = ""
     success: bool = False
     total_duration_s: float = 0.0
+    job_id: str = ""
 
 class EventBus:
     """
@@ -68,16 +76,4 @@ class EventBus:
                 except Exception as e:
                     # Catch all so one broken subscriber doesn't crash the bus
                     print(f"EventBus error notifying subscriber: {e}")
-
-    async def publish_async(self, event_type: str, event: SystemEvent) -> None:
-        """Publish an event, awaiting async subscribers."""
-        if event_type in self._subscribers:
-            for callback in self._subscribers[event_type]:
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(event)
-                    else:
-                        callback(event)
-                except Exception as e:
-                    print(f"EventBus error notifying async subscriber: {e}")
 

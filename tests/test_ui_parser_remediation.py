@@ -2,9 +2,11 @@
 Unit tests for UIParser single-monitor bounds check and exception handling remediation.
 """
 from unittest.mock import MagicMock, patch
-import pytesseract
-import cv2
 import pytest
+
+# Skip tests if heavy dependencies are not available
+pytesseract = pytest.importorskip("pytesseract")
+cv2 = pytest.importorskip("cv2")
 
 from vision.ui_parser import UIParser
 

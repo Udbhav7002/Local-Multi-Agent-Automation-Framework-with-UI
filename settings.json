@@ -1,6 +1,13 @@
 {
-    "manager_model": "qwen2.5-coder:14b",
-    "worker_model": "qwen2.5-coder:14b",
+    "manager_model": "qwen3-coder:30b",
+    "worker_model": "qwen3-coder:30b",
     "vision_model": "qwen2.5vl:7b",
-    "num_ctx": 8192
+    "num_ctx": 8192,
+    "max_plan_regenerations": 3,
+    "max_step_retries": 1,
+    "cli_timeout_seconds": 60.0,
+    "llm_timeout_seconds": 120.0,
+    "memory_success_threshold": 0.15,
+    "memory_failure_threshold": 0.2,
+    "memory_episode_threshold": 0.25
 }

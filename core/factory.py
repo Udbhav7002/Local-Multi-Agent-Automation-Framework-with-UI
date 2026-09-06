@@ -5,7 +5,7 @@ from configuration. This keeps main.py perfectly clean.
 """
 
 from core.config import config
-from core.llm_client import OllamaClient
+from core.llm_client import MultiLLMClient
 from core.prompt_loader import PromptLoader
 from core.router import Router
 from core.planner import Planner
@@ -53,7 +53,7 @@ class FrameworkBuilder:
         event_bus.subscribe("task_completed", _log_event)
 
         # 1. LLM Client — single async instance shared by all agents
-        llm = OllamaClient(num_ctx=config.num_ctx, keep_alive="5m")
+        llm = MultiLLMClient(num_ctx=config.num_ctx, keep_alive="5m")
 
         # 2. Common Utilities
         ui_parser = UIParser()
@@ -64,7 +64,7 @@ class FrameworkBuilder:
         # The user can swap individual agent models at runtime via the /model command.
         router = Router(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
         planner = Planner(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
-        critic = Critic(llm=llm, model_name=config.manager_model, prompt_loader=prompt_loader, event_bus=event_bus)
+        critic = Critic(llm=llm, model_name=config.critic_model, prompt_loader=prompt_loader, event_bus=event_bus)
         worker = Worker(llm=llm, model_name=config.worker_model, prompt_loader=prompt_loader, event_bus=event_bus)
         verifier = VisionVerifier(llm=llm, model_name=config.vision_model, ui_parser=ui_parser)
 

@@ -8,7 +8,12 @@ importing `ollama` directly. This enables:
   - Unit testing with a FakeLLMClient that returns canned responses.
   - Centralizing keep_alive, num_ctx, and retry logic in one place.
 """
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable, AsyncGenerator
+import asyncio
+
+from core.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from core.exceptions import LLMTimeoutError
+from core.llm_retry import execute_with_retry, execute_stream_with_retry
 
 from core.logger import setup_logger
 
@@ -44,6 +49,19 @@ class LLMClient(Protocol):
         """
         ...
 
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Send a chat completion request and stream the response tokens.
+        """
+        ...
+
 
 class OllamaClient:
     """
@@ -62,6 +80,11 @@ class OllamaClient:
         # Instantiate AsyncClient once to reuse the aiohttp ClientSession
         from ollama import AsyncClient
         self._client = AsyncClient()
+        self._breaker = CircuitBreaker(
+            name="ollama",
+            failure_threshold=3,
+            recovery_timeout=60.0,
+        )
 
     async def close(self) -> None:
         """Close the underlying aiohttp/httpx ClientSession to free resources."""
@@ -74,7 +97,7 @@ class OllamaClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-    async def chat(
+async def chat(
         self,
         model: str,
         messages: list[dict],
@@ -83,7 +106,6 @@ class OllamaClient:
         options: Optional[dict] = None,
     ) -> str:
         """Send a chat completion via the Ollama Async SDK with retry and timeout."""
-        import asyncio
         from core.config import config
         
         ollama_options = {"num_ctx": self._num_ctx}
@@ -98,39 +120,269 @@ class OllamaClient:
         }
         if format:
             kwargs["format"] = format
+        if images:
+            kwargs["images"] = images
 
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                logger.debug("LLM request: model=%s, msgs=%d, format=%s (attempt %d)",
-                              model, len(messages), format, attempt + 1)
-                
-                response = await asyncio.wait_for(
-                    self._client.chat(**kwargs),
-                    timeout=config.llm_timeout_seconds
-                )
+        async def _do_chat():
+            async def _call():
+                response = await self._client.chat(**kwargs)
                 content = response.get("message", {}).get("content", "").strip()
                 return str(content)
-                
-            except asyncio.TimeoutError:
-                logger.error("LLM call timed out after %ss (attempt %d/%d)",
-                             config.llm_timeout_seconds, attempt + 1, max_retries)
-                if attempt == max_retries - 1:
-                    raise TimeoutError(
-                        f"LLM call timed out after {config.llm_timeout_seconds}s "
-                        f"({max_retries} attempts)"
-                    )
-            except (ConnectionError, OSError) as e:
-                wait_time = 2 ** attempt  # 1s, 2s, 4s
-                logger.warning(
-                    "Ollama connection error (attempt %d/%d): %s. Retrying in %ds...",
-                    attempt + 1, max_retries, e, wait_time
-                )
-                if attempt == max_retries - 1:
-                    raise
-                await asyncio.sleep(wait_time)
+            
+            return await execute_with_retry(
+                _call,
+                max_retries=3,
+                timeout_seconds=config.llm_timeout_seconds,
+                operation_name=f"Ollama chat (model={model})",
+                retryable_exceptions=(ConnectionError, OSError),
+            )
+             
+        return await self._breaker.call(_do_chat)
+
+async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        from core.config import config
+        ollama_options = {"num_ctx": self._num_ctx}
+        if options:
+            ollama_options.update(options)
+
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+            "options": ollama_options,
+            "keep_alive": self._keep_alive,
+            "stream": True
+        }
+        if format:
+            kwargs["format"] = format
+        if images:
+            kwargs["images"] = images
+
+        async def _stream_factory():
+            response = await self._client.chat(**kwargs)
+            async for chunk in response:
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    yield content
+
+        async for chunk in execute_stream_with_retry(
+            _stream_factory,
+            max_retries=3,
+            timeout_seconds=config.llm_timeout_seconds,
+            operation_name=f"Ollama stream (model={model})",
+            retryable_exceptions=(ConnectionError, OSError),
+        ):
+            yield chunk
+
+
+class LiteLLMClient:
+    """
+    Concrete LLMClient implementation wrapping litellm for cloud models (Claude, GPT, Gemini).
+    """
+
+    def __init__(self) -> None:
+        self._breaker = CircuitBreaker(
+            name="litellm",
+            failure_threshold=3,
+            recovery_timeout=60.0,
+        )
+
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> str:
+        from core.config import config
+        import litellm
+
+        # litellm expects messages in OpenAI format, which is the same as Ollama's
+        kwargs = {
+            "model": model,
+            "messages": messages,
+        }
         
-        raise RuntimeError("LLM call failed after all retries")  # Should not reach here
+        # If response_format is requested (e.g., json), map it for models that support it
+        if format == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        
+        # Handle images for vision models (litellm supports OpenAI vision format)
+        if images:
+            # Convert to OpenAI vision format: add image_url to the last user message
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        msg["content"] = [
+                            {"type": "text", "text": content},
+                            *[{"type": "image_url", "image_url": {"url": img}} for img in images]
+                        ]
+                    break
+
+        async def _do_chat():
+            async def _call():
+                # We need to map model names correctly if needed.
+                # Claude 3.5 Sonnet -> "anthropic/claude-3-5-sonnet-20240620" or just "claude-3-5-sonnet-20240620"
+                if model.startswith("claude-") and not model.startswith("anthropic/"):
+                    api_model = f"anthropic/{model}"
+                else:
+                    api_model = model
+
+                response = await litellm.acompletion(model=api_model, **kwargs)
+                 
+                content = response.choices[0].message.content.strip()
+                return str(content)
+            
+            return await execute_with_retry(
+                _call,
+                max_retries=3,
+                timeout_seconds=config.llm_timeout_seconds,
+                operation_name=f"LiteLLM chat (model={model})",
+                retryable_exceptions=(Exception,),  # litellm can raise various exceptions
+            )
+             
+        return await self._breaker.call(_do_chat)
+
+async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        import litellm
+        from core.config import config
+        
+        kwargs = {
+            "model": model if not (model.startswith("claude-") and not model.startswith("anthropic/")) else f"anthropic/{model}",
+            "messages": messages,
+            "stream": True
+        }
+        if format == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+
+        async def _stream_factory():
+            # litellm.acompletion with stream=True returns an async generator
+            response_gen = litellm.acompletion(**kwargs)
+            
+            # Get first chunk
+            first_chunk = await response_gen.__anext__()
+            content = first_chunk.choices[0].delta.content
+            if content:
+                yield content
+            
+            # Yield remaining chunks
+            async for chunk in response_gen:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+
+        async for chunk in execute_stream_with_retry(
+            _stream_factory,
+            max_retries=3,
+            timeout_seconds=config.llm_timeout_seconds,
+            operation_name=f"LiteLLM stream (model={model})",
+            retryable_exceptions=(Exception,),
+        ):
+            yield chunk
+
+
+class MultiLLMClient:
+    """
+    Routes requests to either Ollama or LiteLLM depending on the model name prefix.
+    """
+
+    def __init__(self, num_ctx: int = 8192, keep_alive: int | str = "5m") -> None:
+        self.ollama = OllamaClient(num_ctx=num_ctx, keep_alive=keep_alive)
+        self.litellm = LiteLLMClient()
+
+    async def close(self) -> None:
+        await self.ollama.close()
+        await self.litellm.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    def _is_cloud_model(self, model: str) -> bool:
+        # Common prefixes for cloud models
+        cloud_prefixes = ["claude-", "gpt-", "gemini-", "anthropic/", "openai/", "google/"]
+        return any(model.startswith(prefix) for prefix in cloud_prefixes)
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> str:
+        try:
+            if self._is_cloud_model(model):
+                return await self.litellm.chat(model, messages, format, images, options)
+            else:
+                return await self.ollama.chat(model, messages, format, images, options)
+        except Exception as e:
+            logger.warning(f"Primary LLM ({model}) failed: {e}. Attempting fallback routing.")
+            fallback_model = "gemini/gemini-2.5-flash" if not self._is_cloud_model(model) else "qwen2.5-coder:14b"
+            
+            if self._is_cloud_model(fallback_model):
+                return await self.litellm.chat(fallback_model, messages, format, images, options)
+            else:
+                return await self.ollama.chat(fallback_model, messages, format, images, options)
+
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        yielded_any = False
+        try:
+            if self._is_cloud_model(model):
+                async for chunk in self.litellm.stream_chat(model, messages, format, images, options):
+                    yielded_any = True
+                    yield chunk
+            else:
+                async for chunk in self.ollama.stream_chat(model, messages, format, images, options):
+                    yielded_any = True
+                    yield chunk
+        except Exception as e:
+            if yielded_any:
+                # Already yielded chunks - don't fall back, just re-raise
+                logger.error(f"Primary LLM ({model}) failed after yielding chunks: {e}")
+                raise
+            logger.warning(f"Primary LLM ({model}) failed before first yield: {e}. Attempting fallback routing.")
+            fallback_model = "gemini/gemini-2.5-flash" if not self._is_cloud_model(model) else "qwen2.5-coder:14b"
+            
+            if self._is_cloud_model(fallback_model):
+                async for chunk in self.litellm.stream_chat(fallback_model, messages, format, images, options):
+                    yield chunk
+            else:
+                async for chunk in self.ollama.stream_chat(fallback_model, messages, format, images, options):
+                    yield chunk
 
 
 class FakeLLMClient:
@@ -169,3 +421,16 @@ class FakeLLMClient:
         response = self._responses[self._call_index % len(self._responses)]
         self._call_index += 1
         return response
+
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: Optional[str] = None,
+        images: Optional[list[str]] = None,
+        options: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        # Just yield the canned response
+        response = await self.chat(model, messages, format, images, options)
+        for i in range(0, len(response), 5):
+            yield response[i:i+5]

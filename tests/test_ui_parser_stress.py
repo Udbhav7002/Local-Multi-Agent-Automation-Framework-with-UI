@@ -7,9 +7,11 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 import pytest
-import cv2
-import pytesseract
-import numpy as np
+
+# Skip tests if heavy dependencies are not available
+cv2 = pytest.importorskip("cv2")
+pytesseract = pytest.importorskip("pytesseract")
+np = pytest.importorskip("numpy")
 
 from vision.ui_parser import UIParser
 

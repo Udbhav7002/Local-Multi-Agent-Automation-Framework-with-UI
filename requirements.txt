@@ -1,15 +1,24 @@
 # Core dependencies
 fastapi
 uvicorn
-websockets
 pyyaml
 jinja2
+pydantic-settings>=2.14.0
+httpx>=0.28.0
+prometheus-client>=0.26.0
 
 # LLM client
 ollama>=0.1.6
+litellm>=1.0.0
+slowapi>=0.1.9
 
 # Memory
 chromadb>=0.4.22
+aiosqlite>=0.22.0
+
+# Telemetry
+opentelemetry-api>=1.43.0
+opentelemetry-sdk>=1.43.0
 
 # Vision & Screen capture
 mss>=9.0.1
@@ -19,20 +28,17 @@ opencv-python>=4.8.0
 
 # GUI Automation
 pyautogui>=0.9.54
-pynput>=1.7.6
 
 # Browser automation
 playwright>=1.40.0
-
-# System
-psutil
 
 # Voice
 SpeechRecognition>=3.10.0
 pyaudio>=0.2.14
 
 # Text UI
-textual>=0.40.0
+rich>=13.7.0
+numpy>=1.26.0
 
 # macOS only - PyObjC for dock icon hiding and accessibility
 pyobjc-core<12.0; sys_platform == "darwin"

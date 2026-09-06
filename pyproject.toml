@@ -11,23 +11,30 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi",
     "uvicorn",
-    "chromadb>=0.4.22",
-    "rich",
     "pyyaml",
-    "playwright>=1.40.0",
-    "aiohttp",
-    "pydantic",
+    "jinja2",
+    "pydantic-settings>=2.14.0",
+    "httpx>=0.28.0",
+    "prometheus-client>=0.26.0",
     "ollama>=0.1.6",
+    "litellm>=1.0.0",
+    "slowapi>=0.1.9",
+    "chromadb>=0.4.22",
+    "aiosqlite>=0.22.0",
+    "opentelemetry-api>=1.43.0",
+    "opentelemetry-sdk>=1.43.0",
     "mss>=9.0.1",
-    "pyautogui>=0.9.54",
-    "pynput>=1.7.6",
     "Pillow>=10.2.0",
     "pytesseract>=0.3.10",
     "opencv-python>=4.8.0",
-    "psutil",
+    "pyautogui>=0.9.54",
+    "playwright>=1.40.0",
     "SpeechRecognition>=3.10.0",
-    "websockets",
-    "jinja2",
+    "pyaudio>=0.2.14",
+    "rich>=13.7.0",
+    "numpy>=1.26.0",
+    "aiohttp",
+    "pydantic",
 ]
 
 # Platform-specific dependencies
@@ -35,6 +42,8 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
+    "hypothesis",
     "flake8",
     "black",
     "mypy"
@@ -46,13 +55,10 @@ macos = [
     "pyobjc-framework-CoreText<12.0; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa<12.0; sys_platform == 'darwin'",
     "pyobjc<12.0; sys_platform == 'darwin'",
-    "textual>=0.40.0; sys_platform == 'darwin'",
 ]
 windows = [
-    "textual>=0.40.0; sys_platform == 'win32'",
 ]
 linux = [
-    "textual>=0.40.0; sys_platform == 'linux'",
 ]
 
 [tool.setuptools.packages.find]
@@ -61,10 +67,19 @@ include = ["core*", "memory*", "vision*", "agents*", "plugins*", "tools*", "skil
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --asyncio-mode=auto"
+addopts = "-ra -q --asyncio-mode=auto --cov=core --cov=memory --cov=vision --cov=api --cov-report=term-missing --cov-fail-under=39"
 testpaths = [
     "tests",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+lint.select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "ASYNC"]
+lint.ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.black]
 line-length = 100
@@ -73,6 +88,21 @@ include = '\.pyi?$'
 
 [tool.mypy]
 python_version = "3.10"
+strict = true
 warn_return_any = true
-warn_unused_configs = true
-ignore_missing_imports = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+
+[tool.mypy.overrides]
+module = [
+    "core.*",
+    "memory.*",
+    "vision.*",
+    "plugins.*",
+    "tools.*",
+    "main",
+    "api",
+    "tests.*",
+]
