@@ -99,6 +99,8 @@ def draw_splash_screen(router_model: str, planner_model: str, vision_model: str)
     commands_table.add_row("/status", "Live system & health dashboard")
     commands_table.add_row("/skills", "View cached reusable skill plans")
     commands_table.add_row("/jobs", "Inspect background API jobs")
+    commands_table.add_row("/cost", "Cloud vision cost summary")
+    commands_table.add_row("/consent", "Cloud vision consent/settings")
     commands_table.add_row("/model", "Swap local LLM models on the fly")
     commands_table.add_row("/history", "View session task history")
     commands_table.add_row("/clear", "Reset & clear terminal display")
@@ -277,6 +279,103 @@ def _handle_model_command(orchestrator: Orchestrator, parts: list[str]) -> None:
         console.print("  [#ff0000]x Usage: /model [manager|worker|vision|critic] [new_model][/#ff0000]")
 
 
+def _show_cost(orchestrator: Orchestrator) -> None:
+    """Displays current session cloud vision cost summary."""
+    try:
+        verifier = getattr(orchestrator.step_runner, 'verifier', None)
+        if verifier and hasattr(verifier, 'get_cost_summary'):
+            summary = verifier.get_cost_summary()
+        else:
+            from core.cost_tracker import get_cost_tracker
+            summary = get_cost_tracker().get_session_summary()
+
+        if summary["request_count"] == 0:
+            console.print("  [#888888]No cloud vision requests in this session yet.[/#888888]\n")
+            return
+
+        table = Table(title="💰 Cloud Vision Cost Summary", box=box.ROUNDED, border_style="yellow", padding=(0, 2))
+        table.add_column("Metric", style="bold white", width=28)
+        table.add_column("Value", style="bold green")
+
+        table.add_row("Total Cost", f"${summary['total_cost_usd']:.6f}")
+        table.add_row("Total Tokens", f"{summary['total_tokens']:,}")
+        table.add_row("  Input Tokens", f"{summary['total_input_tokens']:,}")
+        table.add_row("  Output Tokens", f"{summary['total_output_tokens']:,}")
+        table.add_row("Request Count", str(summary['request_count']))
+
+        console.print(table)
+        console.print()
+
+        # By model
+        if summary.get('by_model'):
+            model_table = Table(title="By Model", box=box.SIMPLE, padding=(0, 2))
+            model_table.add_column("Model", style="bold cyan")
+            model_table.add_column("Cost", style="green")
+            model_table.add_column("Input", style="white")
+            model_table.add_column("Output", style="white")
+            model_table.add_column("Requests", style="yellow")
+            for model, data in summary['by_model'].items():
+                model_table.add_row(model, f"${data['cost']:.6f}", f"{data['input']:,}", f"{data['output']:,}", str(data['count']))
+            console.print(model_table)
+            console.print()
+
+        # By operation
+        if summary.get('by_operation'):
+            op_table = Table(title="By Operation", box=box.SIMPLE, padding=(0, 2))
+            op_table.add_column("Operation", style="bold cyan")
+            op_table.add_column("Cost", style="green")
+            op_table.add_column("Requests", style="yellow")
+            for op, data in summary['by_operation'].items():
+                op_table.add_row(op, f"${data['cost']:.6f}", str(data['count']))
+            console.print(op_table)
+            console.print()
+
+        # Budget status
+        from core.config import config
+        session_pct = (summary['total_cost_usd'] / config.max_vision_cost_per_session_usd) * 100 if config.max_vision_cost_per_session_usd > 0 else 0
+        bar = "█" * int(session_pct / 5) + "░" * (20 - int(session_pct / 5))
+        color = "green" if session_pct < 50 else ("yellow" if session_pct < 80 else "red")
+        console.print(f"  Session Budget: [{color}]{bar}[/{color}] {session_pct:.1f}% (${summary['total_cost_usd']:.4f} / ${config.max_vision_cost_per_session_usd:.2f})")
+        console.print()
+
+    except Exception as e:
+        console.print(f"  [red]Error getting cost summary: {e}[/red]\n")
+
+
+def _handle_consent(orchestrator: Orchestrator, user_text: str) -> None:
+    """Handles /consent command for cloud vision."""
+    parts = user_text.split()
+    if len(parts) == 1:
+        console.print(f"  Cloud Vision Enabled: {'[green]Yes[/green]' if config.cloud_vision_enabled else '[red]No[/red]'}")
+        console.print(f"  Consent Given: {'[green]Yes[/green]' if config.cloud_vision_consent_given else '[red]No[/red]'}")
+        console.print(f"  Session Budget: ${config.max_vision_cost_per_session_usd:.2f}")
+        console.print(f"  Per-Request Limit: ${config.max_vision_cost_per_request_usd:.4f}")
+        console.print("  Usage: /consent grant | revoke | enable | disable")
+        console.print()
+        return
+
+    action = parts[1].lower()
+    if action == 'grant':
+        config.cloud_vision_consent_given = True
+        config.save()
+        console.print("  [green]✓[/green] Cloud vision consent granted.")
+    elif action == 'revoke':
+        config.cloud_vision_consent_given = False
+        config.save()
+        console.print("  [yellow]⚠[/yellow] Cloud vision consent revoked.")
+    elif action == 'enable':
+        config.cloud_vision_enabled = True
+        config.save()
+        console.print("  [green]✓[/green] Cloud vision enabled.")
+    elif action == 'disable':
+        config.cloud_vision_enabled = False
+        config.save()
+        console.print("  [yellow]⚠[/yellow] Cloud vision disabled.")
+    else:
+        console.print("  [red]x Usage: /consent grant | revoke | enable | disable[/red]")
+    console.print()
+
+
 async def async_main(args: argparse.Namespace) -> None:
     """
     Asynchronous main loop.
@@ -373,6 +472,8 @@ async def async_main(args: argparse.Namespace) -> None:
                     help_table.add_row("/skills", "View reusable skills learned in SkillLibrary")
                     help_table.add_row("/jobs", "Inspect recent background API jobs from sqlite")
                     help_table.add_row("/history", "Show task history in current session")
+                    help_table.add_row("/cost", "Show cloud vision cost summary")
+                    help_table.add_row("/consent", "Manage cloud vision consent & settings")
                     help_table.add_row("/model", "Swap models on the fly (e.g., /model worker qwen2.5-coder:14b)")
                     help_table.add_row("/voice", "Dictate task using voice recognition")
                     help_table.add_row("/clear", "Clear terminal and re-draw dashboard")
@@ -402,11 +503,19 @@ async def async_main(args: argparse.Namespace) -> None:
                     console.clear()
                     draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
                     continue
-    
+     
                 if user_text.lower() == '/save':
                     console.print("  [#00ff00]✓[/#00ff00] [#888888]Session state saved.[/#888888]")
                     continue
-    
+     
+                if user_text.lower() == '/cost':
+                    _show_cost(orchestrator)
+                    continue
+
+                if user_text.lower().startswith('/consent'):
+                    _handle_consent(orchestrator, user_text)
+                    continue
+     
                 if user_text.lower().startswith('/model'):
                     parts = user_text.split()
                     _handle_model_command(orchestrator, parts)

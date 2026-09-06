@@ -38,6 +38,12 @@ class Config(BaseSettings):
     # Vision verification
     vision_auto_continue_on_uncertain: bool = False
 
+    # Cloud Vision & Cost Controls
+    cloud_vision_enabled: bool = False
+    cloud_vision_consent_given: bool = False
+    max_vision_cost_per_session_usd: float = 1.0
+    max_vision_cost_per_request_usd: float = 0.10
+
     # API endpoints
     ollama_base_url: str = "http://localhost:11434"
 
@@ -152,6 +158,10 @@ class Config(BaseSettings):
                     "screenshot_retention_days": self.screenshot_retention_days,
                     "auto_continue": self.auto_continue,
                     "vision_auto_continue_on_uncertain": self.vision_auto_continue_on_uncertain,
+                    "cloud_vision_enabled": self.cloud_vision_enabled,
+                    "cloud_vision_consent_given": self.cloud_vision_consent_given,
+                    "max_vision_cost_per_session_usd": self.max_vision_cost_per_session_usd,
+                    "max_vision_cost_per_request_usd": self.max_vision_cost_per_request_usd,
                     "ollama_base_url": self.ollama_base_url,
                     "action_timeouts": self.action_timeouts,
                     "sandbox_root": self.sandbox_root,

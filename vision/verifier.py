@@ -3,9 +3,11 @@ Vision verification module for evaluating screen states using a vision-language 
 """
 import json
 import re
+import asyncio
 
 from core.logger import setup_logger
 from core.config import config
+from core.cost_tracker import get_cost_tracker
 from vision.screen_capture import ScreenCapture
 
 logger = setup_logger("VisionVerifier")
@@ -21,6 +23,7 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         self.model_name = model_name
         self.screen_cap = ScreenCapture()
         self.ui_parser = ui_parser
+        self._cost_tracker = get_cost_tracker()
         # Check if the LLM client is a MultiLLMClient to detect cloud models
         self._is_cloud = self._detect_cloud_model()
 
@@ -51,6 +54,44 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
                 'content': prompt,
                 'images': [screenshot_path]
             }
+
+    def _estimate_tokens(self, prompt: str, has_image: bool = True) -> tuple[int, int]:
+        """Rough token estimation for vision requests."""
+        # Rough estimate: ~4 chars per token for text
+        text_tokens = len(prompt) // 4
+        # Image tokens: ~85 tokens per tile for GPT-4o (low detail), 
+        # up to ~170 for high detail. We'll estimate 200 for safety.
+        image_tokens = 200 if has_image else 0
+        # Output estimate: JSON response ~50 tokens
+        output_tokens = 50
+        return text_tokens + image_tokens, output_tokens
+
+    def _check_cloud_permissions(self) -> tuple[bool, str]:
+        """Check if cloud vision is enabled and user has consented."""
+        if not self._is_cloud:
+            return True, ""
+        if not config.cloud_vision_enabled:
+            return False, "Cloud vision is disabled. Set cloud_vision_enabled=true in config to enable."
+        if not config.cloud_vision_consent_given:
+            return False, "Cloud vision requires explicit consent. Set cloud_vision_consent_given=true after reviewing privacy implications."
+        return True, ""
+
+    def _check_budget(self, prompt: str) -> tuple[bool, str]:
+        """Check if request fits within budget limits."""
+        if not self._is_cloud:
+            return True, ""
+        input_tokens, output_tokens = self._estimate_tokens(prompt)
+        can_afford, reason = self._cost_tracker.can_afford_request(
+            self.model_name, input_tokens, output_tokens)
+        return can_afford, reason
+
+    def _record_usage(self, prompt: str, operation: str) -> None:
+        """Record actual token usage after a request."""
+        if not self._is_cloud:
+            return
+        input_tokens, output_tokens = self._estimate_tokens(prompt)
+        self._cost_tracker.record_usage(
+            self.model_name, input_tokens, output_tokens, operation)
 
     def _fast_ocr_verify(self, image_path: str, expected_outcome: str, target_text: str, action: str) -> tuple[bool, str]:
         """
@@ -92,6 +133,11 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         if ocr_success:
             return True, ocr_msg
 
+        # Check cloud permissions
+        allowed, reason = self._check_cloud_permissions()
+        if not allowed:
+            logger.warning("Cloud vision blocked: %s", reason)
+            return False, reason
 
         prompt = (
             f"Look at this screenshot. Is the current state of the screen consistent with this goal: '{expected_outcome}'?\n"
@@ -102,6 +148,12 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
             "{{\"success\": true, \"reason\": \"your reason here\"}}"
         )
 
+        # Check budget
+        allowed, reason = self._check_budget(prompt)
+        if not allowed:
+            logger.warning("Budget exceeded: %s", reason)
+            return False, f"Budget limit: {reason}"
+
         try:
             logger.debug("Asking %s to verify...", self.model_name)
             message = self._build_vision_message(prompt, screenshot_path)
@@ -111,6 +163,9 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
                 format='json',
                 options={'temperature': 0.0}
             )
+
+            # Record usage
+            self._record_usage(prompt, "vision_verify")
 
             # Clean up markdown code blocks if present
             clean_answer = answer.replace(
@@ -157,11 +212,23 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         screenshot_path = await asyncio.to_thread(
             self.screen_cap.capture_fullscreen, "question_state.png")
 
+        # Check cloud permissions
+        allowed, reason = self._check_cloud_permissions()
+        if not allowed:
+            logger.warning("Cloud vision blocked: %s", reason)
+            return f"Cloud vision blocked: {reason}"
+
         prompt = (
             f"You are an AI assistant looking at the user's screen. "
             f"Answer the following question about what you see: {question}"
         )
-        
+
+        # Check budget
+        allowed, reason = self._check_budget(prompt)
+        if not allowed:
+            logger.warning("Budget exceeded: %s", reason)
+            return f"Budget limit: {reason}"
+
         try:
             message = self._build_vision_message(prompt, screenshot_path)
             content = await self.llm.chat(
@@ -169,7 +236,14 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
                 messages=[message],
                 options={'temperature': 0.0}
             )
+
+            # Record usage
+            self._record_usage(prompt, "vision_ask")
             return str(content.strip())
         except Exception as e:
             logger.error("Vision Question Error: %s", e)
             return f"I ran into an error trying to see the screen: {e}"
+
+    def get_cost_summary(self) -> dict:
+        """Get current session cost summary."""
+        return self._cost_tracker.get_session_summary()
