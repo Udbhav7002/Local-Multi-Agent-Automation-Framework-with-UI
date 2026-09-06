@@ -270,7 +270,20 @@ async def stream_chat(
     ) -> AsyncGenerator[str, None]:
         import litellm
         from core.config import config
-        
+
+        # Handle images for vision models (litellm supports OpenAI vision format)
+        if images:
+            # Convert to OpenAI vision format: add image_url to the last user message
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        msg["content"] = [
+                            {"type": "text", "text": content},
+                            *[{"type": "image_url", "image_url": {"url": img}} for img in images]
+                        ]
+                    break
+
         kwargs = {
             "model": model if not (model.startswith("claude-") and not model.startswith("anthropic/")) else f"anthropic/{model}",
             "messages": messages,
@@ -326,8 +339,21 @@ class MultiLLMClient:
 
     def _is_cloud_model(self, model: str) -> bool:
         # Common prefixes for cloud models
-        cloud_prefixes = ["claude-", "gpt-", "gemini-", "anthropic/", "openai/", "google/"]
+        cloud_prefixes = ["claude-", "gpt-", "gemini-", "anthropic/", "openai/", "google/", "nvidia/"]
         return any(model.startswith(prefix) for prefix in cloud_prefixes)
+
+    def _is_vision_model(self, model: str) -> bool:
+        """Check if model supports vision (image input)."""
+        vision_models = [
+            "gpt-4o", "gpt-4-turbo", "gpt-4-vision",
+            "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+            "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash",
+            "llava", "llava-next", "bakllava", "moondream",
+            "qwen2.5vl", "qwen2-vl",
+            "pixtral", "nemotron-3-ultra",
+        ]
+        model_lower = model.lower()
+        return any(vm in model_lower for vm in vision_models)
 
     async def chat(
         self,

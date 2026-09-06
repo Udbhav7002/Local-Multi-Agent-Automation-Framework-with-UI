@@ -21,6 +21,36 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         self.model_name = model_name
         self.screen_cap = ScreenCapture()
         self.ui_parser = ui_parser
+        # Check if the LLM client is a MultiLLMClient to detect cloud models
+        self._is_cloud = self._detect_cloud_model()
+
+    def _detect_cloud_model(self) -> bool:
+        """Detect if the current model routes through cloud provider."""
+        if hasattr(self.llm, '_is_cloud_model'):
+            return self.llm._is_cloud_model(self.model_name)
+        if hasattr(self.llm, 'ollama') and hasattr(self.llm, 'litellm'):
+            # MultiLLMClient
+            return self.llm._is_cloud_model(self.model_name)
+        return False
+
+    def _build_vision_message(self, prompt: str, screenshot_path: str) -> dict:
+        """Build message with image in the correct format for the model."""
+        if self._is_cloud:
+            # OpenAI-compatible format (LiteLLM)
+            return {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': screenshot_path}}
+                ]
+            }
+        else:
+            # Ollama format
+            return {
+                'role': 'user',
+                'content': prompt,
+                'images': [screenshot_path]
+            }
 
     def _fast_ocr_verify(self, image_path: str, expected_outcome: str, target_text: str, action: str) -> tuple[bool, str]:
         """
@@ -74,14 +104,10 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
 
         try:
             logger.debug("Asking %s to verify...", self.model_name)
-            # Images are passed in the message dict for ollama compatibility
+            message = self._build_vision_message(prompt, screenshot_path)
             answer = await self.llm.chat(
                 model=self.model_name,
-                messages=[{
-                    'role': 'user',
-                    'content': prompt,
-                    'images': [screenshot_path]
-                }],
+                messages=[message],
                 format='json',
                 options={'temperature': 0.0}
             )
@@ -137,17 +163,10 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         )
         
         try:
-            # We assume OllamaClient handles passing images to vision models.
-            # In our current setup, images are passed in the 'images' key of the message.
-            messages = [{
-                'role': 'user', 
-                'content': prompt, 
-                'images': [screenshot_path]
-            }]
-            
+            message = self._build_vision_message(prompt, screenshot_path)
             content = await self.llm.chat(
                 model=self.model_name,
-                messages=messages,
+                messages=[message],
                 options={'temperature': 0.0}
             )
             return str(content.strip())
