@@ -68,7 +68,10 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
+      # Full history so gitleaks-action can resolve the scanned commit range on push
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
