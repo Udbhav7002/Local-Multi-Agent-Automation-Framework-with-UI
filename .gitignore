@@ -23,4 +23,5 @@ screenshots/
 browser_profile/
 venv_new/
 .api.pid
-api_server.log
+*.log
+user_preferences.json
