@@ -32,4 +32,4 @@ docker-run:
 
 # Run deterministic benchmark suite (if tests exist in benchmarks folder)
 benchmark:
-	pytest benchmarks/ -v --asyncio-mode=auto
+	pytest benchmarks/ -v --asyncio-mode=auto --no-cov

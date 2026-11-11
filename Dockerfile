@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxrender1 \
     libxext6 \
+    gcc \
+    portaudio19-dev \
     scrot \
     x11-utils \
     gnupg2 \
@@ -18,6 +20,9 @@ RUN apt-get update && apt-get install -y \
 RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
+
+# The app writes screenshots/, jobs.db and local DBs into its working directory
+RUN chown appuser:appuser /app
 
 # Install Python dependencies
 COPY requirements.txt .

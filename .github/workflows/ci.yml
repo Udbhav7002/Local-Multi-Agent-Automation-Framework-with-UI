@@ -33,6 +33,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc portaudio19-dev
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
@@ -52,7 +56,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr libgl1 libglib2.0-0 libsm6 libxrender1 libxext6
+          sudo apt-get install -y tesseract-ocr libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 portaudio19-dev
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
@@ -71,13 +75,15 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install security tools
         run: |
-          pip install bandit pip-audit gitleaks
+          pip install bandit pip-audit
       - name: Run bandit
         run: bandit -r core/ memory/ vision/ api.py main.py -f json -o bandit-report.json || true
       - name: Run pip-audit
         run: pip-audit --desc || true
       - name: Run gitleaks
-        run: gitleaks detect --source . --verbose || true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
     name: Docker Build
