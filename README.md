@@ -219,6 +219,12 @@ pytest tests/ -v
 
 ---
 
+## 📄 License
+
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
 <div align="center">
 Made with ❤️ by Udbhav7002 • 100% Privacy-First OS Automation
 </div>
