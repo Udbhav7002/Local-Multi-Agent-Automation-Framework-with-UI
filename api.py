@@ -1,35 +1,38 @@
 """
 Asynchronous API Layer for the Local Multi-Agent Automation Framework.
 """
-import os
 import asyncio
-import uuid
-import json
 import datetime
+import json
+import os
 import secrets
-import aiosqlite
 import sqlite3
+import time
+import uuid
+from contextlib import asynccontextmanager, suppress
 from datetime import timezone
-from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, Security, Response
+
+import aiosqlite
+import httpx
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, Security
 from fastapi.security.api_key import APIKeyHeader
-from fastapi import Request
+from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from prometheus_client import Counter, Histogram, generate_latest
-import httpx
+from slowapi.util import get_remote_address
 
-from core.factory import FrameworkBuilder
-from core.config import config
-from core.logger import setup_logger
-from core.events import TaskStateChangedEvent
 from core.circuit_breaker import CircuitBreakerOpenError
-from core.logger import set_task_id
+from core.config import config
+from core.events import TaskStateChangedEvent
+from core.factory import FrameworkBuilder
+from core.logger import set_task_id, setup_logger
+
+if TYPE_CHECKING:
+    from core.orchestrator import Orchestrator
 
 logger = setup_logger("API")
 
@@ -46,13 +49,13 @@ if not API_KEY:
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
-    if not secrets.compare_digest(api_key_header, API_KEY):
+    if not API_KEY or not secrets.compare_digest(api_key_header, API_KEY):
         raise HTTPException(status_code=403, detail="Could not validate credentials")
     return api_key_header
 
 class PromptRequest(BaseModel):
     text: str
-    webhook_url: Optional[str] = None
+    webhook_url: str | None = None
 
 class ErrorCode(str, Enum):
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
@@ -66,7 +69,7 @@ class ErrorResponse(BaseModel):
     error_code: ErrorCode
     message: str
     request_id: str
-    details: Optional[dict] = None
+    details: dict | None = None
 
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _JOBS_DB_PATH = os.path.join(_PROJECT_ROOT, "jobs.db")
@@ -74,76 +77,80 @@ _JOBS_DB_PATH = os.path.join(_PROJECT_ROOT, "jobs.db")
 class JobStore:
     def __init__(self, db_path=_JOBS_DB_PATH):
         self.db_path = db_path
-        self._pool = None
+        self._pool: aiosqlite.Connection | None = None
+
+    @property
+    def _db(self) -> aiosqlite.Connection:
+        """Return the open connection (set by connect())."""
+        assert self._pool is not None, "JobStore.connect() must be awaited first"
+        return self._pool
 
     async def connect(self):
         self._pool = await aiosqlite.connect(self.db_path)
-        self._pool.row_factory = aiosqlite.Row
-        await self._pool.execute("PRAGMA journal_mode=WAL")
-        await self._pool.execute("PRAGMA foreign_keys=ON")
-        await self._pool.commit()
-        
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.commit()
+
         # Run sync migrations in a thread during initialization
-        import sqlite3
         from migrations.runner import run_migrations
         await asyncio.to_thread(run_migrations, self.db_path)
 
         # Create indices
-        await self._pool.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
-        await self._pool.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)")
-        await self._pool.commit()
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)")
+        await self._db.commit()
 
     async def close(self):
         if self._pool:
             await self._pool.close()
 
-    async def create_job(self, job_id: str, payload: str = "", webhook_url: str = None) -> None:
+    async def create_job(self, job_id: str, payload: str = "", webhook_url: str | None = None) -> None:
         now = datetime.datetime.now(timezone.utc).isoformat()
-        webhook_json = json.dumps({"url": webhook_url}) if webhook_url else None
-        # We store webhook_url in the payload column as JSON alongside the text, or we can just append it to text since we don't have a webhook column.
-        # Since we just added 'payload' column in migration 2, let's use it for a JSON dict holding extra info.
+        # Store webhook_url in the payload column as JSON. 'payload' was added in migration 2
+        # and holds a JSON dict with extra info.
         job_data = json.dumps({"text": payload, "webhook_url": webhook_url})
-        await self._pool.execute(
+        await self._db.execute(
             "INSERT INTO jobs (job_id, status, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             (job_id, "QUEUED", job_data, now, now)
         )
-        await self._pool.commit()
+        await self._db.commit()
 
-    async def update_job(self, job_id: str, status: str, result: str = None, steps_executed: list = None) -> None:
+    async def update_job(self, job_id: str, status: str, result: str | None = None, steps_executed: list | None = None) -> None:
         now = datetime.datetime.now(timezone.utc).isoformat()
         steps_str = json.dumps(steps_executed) if steps_executed is not None else None
-        
+
         if result is not None and steps_executed is not None:
-            await self._pool.execute(
+            await self._db.execute(
                 "UPDATE jobs SET status = ?, result = ?, steps_executed = ?, updated_at = ? WHERE job_id = ?",
                 (status, result, steps_str, now, job_id)
             )
         elif result is not None:
-            await self._pool.execute(
+            await self._db.execute(
                 "UPDATE jobs SET status = ?, result = ?, updated_at = ? WHERE job_id = ?",
                 (status, result, now, job_id)
             )
         elif steps_executed is not None:
-            await self._pool.execute(
+            await self._db.execute(
                 "UPDATE jobs SET status = ?, steps_executed = ?, updated_at = ? WHERE job_id = ?",
                 (status, steps_str, now, job_id)
             )
         else:
-            await self._pool.execute(
+            await self._db.execute(
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ?",
                 (status, now, job_id)
             )
-        await self._pool.commit()
+        await self._db.commit()
 
     async def get_job(self, job_id: str) -> dict | None:
-        async with self._pool.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)) as cursor:
+        async with self._db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return dict(row)
             return None
 
     async def get_queued_jobs(self) -> list[dict]:
-        async with self._pool.execute("SELECT * FROM jobs WHERE status = 'QUEUED' ORDER BY created_at ASC") as cursor:
+        async with self._db.execute("SELECT * FROM jobs WHERE status = 'QUEUED' ORDER BY created_at ASC") as cursor:
             return [dict(row) for row in await cursor.fetchall()]
 
 # Metrics
@@ -152,42 +159,53 @@ REQUEST_LATENCY = Histogram('agent_request_duration_seconds', 'Request latency')
 JOB_DURATION = Histogram('agent_job_duration_seconds', 'Job execution time', ['status'])
 
 # Global orchestrator instance
-orchestrator = None
-job_store = None
-active_job_tasks = set()
-job_queue = asyncio.Queue()
-cancellation_tokens = {}
+orchestrator: "Orchestrator | None" = None
+job_store: JobStore | None = None
+active_job_tasks: set[asyncio.Task] = set()
+job_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+cancellation_tokens: dict[str, bool] = {}
 _JOB_SEMAPHORE = asyncio.Semaphore(3)
+
+def _job_store() -> JobStore:
+    """Return the initialized JobStore (set during app lifespan)."""
+    assert job_store is not None, "JobStore not initialized (app lifespan did not run)"
+    return job_store
+
+def _cleanup_old_screenshots() -> None:
+    """Delete screenshots older than the configured retention window (blocking I/O)."""
+    retention_seconds = config.screenshot_retention_days * 86400
+    now = time.time()
+    for root, _, files in os.walk(config.screenshots_dir):
+        for file in files:
+            path = os.path.join(root, file)
+            if now - os.path.getctime(path) > retention_seconds:
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    logger.error(f"Failed to delete old screenshot {path}: {e}")
 
 async def background_summarization_job():
     while True:
         try:
             # Run every hour (3600 seconds)
             await asyncio.sleep(3600)
-            if orchestrator and orchestrator.memory:
+            memory = orchestrator.memory if orchestrator else None
+            summarize = getattr(memory, "summarize_old_episodes", None)
+            if summarize is not None:
                 logger.info("Running background episodic memory summarization...")
-                await orchestrator.memory.summarize_old_episodes(100)
-                
-            # Cleanup old screenshots
+                await summarize(100)
+
+            # Cleanup old screenshots (offloaded to a thread: blocking filesystem I/O)
             if config.screenshot_retention_days > 0:
                 logger.info("Cleaning up old screenshots...")
-                retention_seconds = config.screenshot_retention_days * 86400
-                now = time.time()
-                for root, _, files in os.walk(config.screenshots_dir):
-                    for file in files:
-                        path = os.path.join(root, file)
-                        if now - os.path.getctime(path) > retention_seconds:
-                            try:
-                                os.remove(path)
-                            except Exception as e:
-                                logger.error(f"Failed to delete old screenshot {path}: {e}")
-                                
+                await asyncio.to_thread(_cleanup_old_screenshots)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error("Error in background summarization job: %s", e)
 
-async def _bounded_job_wrapper(job_id: str, text: str, webhook_url: str = None):
+async def _bounded_job_wrapper(job_id: str, text: str, webhook_url: str | None = None):
     async with _JOB_SEMAPHORE:
         task = asyncio.create_task(run_job(job_id, text, webhook_url))
         active_job_tasks.add(task)
@@ -199,7 +217,7 @@ async def queue_worker():
         try:
             job_id, job_data_str = await job_queue.get()
             logger.info("Worker picked up job %s", job_id)
-            
+
             # Parse payload to extract text and webhook
             try:
                 job_data = json.loads(job_data_str)
@@ -208,12 +226,13 @@ async def queue_worker():
             except json.JSONDecodeError:
                 text = job_data_str
                 webhook_url = None
-                
+
             task = asyncio.create_task(_bounded_job_wrapper(job_id, text, webhook_url))
             active_job_tasks.add(task)
             task.add_done_callback(active_job_tasks.discard)
             # Add exception handler to log any unhandled exceptions
-            def _handle_task_exception(t):
+            # (bind job_id now: the callback may fire after the loop advanced)
+            def _handle_task_exception(t, job_id=job_id):
                 try:
                     t.result()
                 except asyncio.CancelledError:
@@ -234,13 +253,13 @@ async def lifespan(app: FastAPI):
     orchestrator = FrameworkBuilder.build_orchestrator()
     job_store = JobStore()
     await job_store.connect()
-    
+
     # Recover queued jobs from previous run
     recovered_jobs = await job_store.get_queued_jobs()
     for job in recovered_jobs:
         job_queue.put_nowait((job["job_id"], job.get("payload", "")))
         logger.info("Recovered queued job: %s", job["job_id"])
-        
+
     def on_state_changed(event: TaskStateChangedEvent):
         # Only update if job is not already in a terminal state to avoid race conditions
         async def _update():
@@ -258,21 +277,21 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error("Unhandled exception in state update task: %s", e)
         task.add_done_callback(_handle_task_exception)
-        
+
     orchestrator.engine.event_bus.subscribe("task_state_changed", on_state_changed)
-    
+
     # Start background tasks
     summarize_task = asyncio.create_task(background_summarization_job())
     worker_task = asyncio.create_task(queue_worker())
-    
+
     yield
-    
+
     logger.info("Shutting down Framework Orchestrator...")
     summarize_task.cancel()
     worker_task.cancel()
-    
+
     logger.info("Draining in-flight jobs...")
-    
+
     # Wait for the queue worker to finish current tasks, up to 30 seconds
     try:
         await asyncio.wait_for(job_queue.join(), timeout=30.0)
@@ -285,14 +304,12 @@ async def lifespan(app: FastAPI):
     for task in list(active_job_tasks):
         if not task.done():
             task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
-                
+
     if hasattr(orchestrator.step_runner, "executor"):
         await orchestrator.step_runner.executor.shutdown()
-        
+
     await job_store.close()
 
 app = FastAPI(
@@ -339,9 +356,9 @@ async def add_metrics(request: Request, call_next):
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# slowapi's handler signature is narrower than Starlette's expected type
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
-import time
 
 def _validate_webhook_url(url: str) -> bool:
     """Basic SSRF protection for webhook URLs."""
@@ -358,9 +375,9 @@ def _validate_webhook_url(url: str) -> bool:
     except Exception:
         return False
 
-async def run_job(job_id: str, text: str, webhook_url: str = None):
+async def run_job(job_id: str, text: str, webhook_url: str | None = None):
     start_time = time.time()
-    await job_store.update_job(job_id, "RUNNING")
+    await _job_store().update_job(job_id, "RUNNING")
     status_label = "FAILED"
     result = None
     try:
@@ -368,10 +385,11 @@ async def run_job(job_id: str, text: str, webhook_url: str = None):
         if cancellation_tokens.get(job_id):
             status_label = "CANCELLED"
             result = "Job cancelled before start"
-            await job_store.update_job(job_id, "CANCELLED", result=result)
+            await _job_store().update_job(job_id, "CANCELLED", result=result)
             return
-        
+
         # Run the job and capture actual success/failure
+        assert orchestrator is not None, "Orchestrator not initialized (app lifespan did not run)"
         success = await orchestrator.process_prompt(text, job_id=job_id)
         if success:
             status_label = "COMPLETED"
@@ -379,18 +397,18 @@ async def run_job(job_id: str, text: str, webhook_url: str = None):
         else:
             status_label = "FAILED"
             result = "Task failed"
-        await job_store.update_job(job_id, status_label, result=result)
+        await _job_store().update_job(job_id, status_label, result=result)
     except CircuitBreakerOpenError as e:
         logger.error("Job %s failed fast due to circuit breaker: %s", job_id, e)
         result = str(e)
-        await job_store.update_job(job_id, "FAILED", result=result)
+        await _job_store().update_job(job_id, "FAILED", result=result)
     except asyncio.CancelledError:
         logger.error("Job %s cancelled during shutdown", job_id)
         result = "System shutdown"
-        await job_store.update_job(job_id, "FAILED", result=result)
+        await _job_store().update_job(job_id, "FAILED", result=result)
     except Exception as e:
         result = str(e)
-        await job_store.update_job(job_id, "FAILED", result=result)
+        await _job_store().update_job(job_id, "FAILED", result=result)
     finally:
         JOB_DURATION.labels(status=status_label).observe(time.time() - start_time)
         if webhook_url and _validate_webhook_url(webhook_url):
@@ -417,17 +435,17 @@ async def process_prompt(request: PromptRequest, req: Request, api_key: str = De
     """
     logger.info(f"API received prompt: {request.text}")
     job_id = str(uuid.uuid4())
-    await job_store.create_job(job_id, request.text, request.webhook_url)
-    
+    await _job_store().create_job(job_id, request.text, request.webhook_url)
+
     # Push to in-memory queue for worker to pick up
     job_data = json.dumps({"text": request.text, "webhook_url": request.webhook_url})
     await job_queue.put((job_id, job_data))
-    
+
     return {"job_id": job_id, "status": "queued"}
 
 @v1_router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, api_key: str = Depends(get_api_key)):
-    job = await job_store.get_job(job_id)
+    job = await _job_store().get_job(job_id)
     if not job or job["status"] not in ("QUEUED", "RUNNING"):
         from core.logger import get_task_id
         raise HTTPException(
@@ -438,15 +456,15 @@ async def cancel_job(job_id: str, api_key: str = Depends(get_api_key)):
                 request_id=get_task_id()
             ).model_dump()
         )
-    
+
     cancellation_tokens[job_id] = True
-    
+
     # If job is running, signal the step runner to cancel
     if job["status"] == "RUNNING" and orchestrator and hasattr(orchestrator, "step_runner"):
         orchestrator.step_runner.cancel()
-    
+
     # Update job status to CANCELLED
-    await job_store.update_job(job_id, "CANCELLED", result="Cancelled by user")
+    await _job_store().update_job(job_id, "CANCELLED", result="Cancelled by user")
     return {"job_id": job_id, "status": "CANCELLED"}
 
 @v1_router.get("/status/{job_id}")
@@ -454,7 +472,7 @@ async def get_status(job_id: str, api_key: str = Depends(get_api_key)):
     """
     Get the status of a job.
     """
-    job = await job_store.get_job(job_id)
+    job = await _job_store().get_job(job_id)
     if not job:
         from core.logger import get_task_id
         raise HTTPException(
@@ -481,19 +499,19 @@ async def health_check():
     """
     Deep health check endpoint.
     """
-    health = {
+    health: dict[str, Any] = {
         "status": "healthy",
         "manager_model": config.manager_model,
         "worker_model": config.worker_model,
         "vision_model": config.vision_model,
         "checks": {}
     }
-    
+
     # Check SQLite
     try:
         # Just run a quick pragma to see if DB is responsive
         def _check_sqlite():
-            conn = sqlite3.connect(job_store.db_path)
+            conn = sqlite3.connect(_job_store().db_path)
             try:
                 conn.execute("PRAGMA user_version").fetchone()
             finally:
@@ -503,7 +521,7 @@ async def health_check():
     except Exception as e:
         health["checks"]["sqlite"] = f"error: {str(e)}"
         health["status"] = "degraded"
-        
+
     # Check Ollama
     try:
         async with httpx.AsyncClient() as client:
@@ -516,12 +534,14 @@ async def health_check():
     except Exception as e:
         health["checks"]["ollama"] = f"error: {str(e)}"
         health["status"] = "degraded"
-        
+
     # Check ChromaDB
     try:
-        if orchestrator and orchestrator.memory and orchestrator.memory.chroma:
+        memory = orchestrator.memory if orchestrator else None
+        chroma = getattr(memory, "chroma", None)
+        if chroma is not None:
             # Quick pulse check
-            orchestrator.memory.chroma.heartbeat()
+            chroma.heartbeat()
             health["checks"]["chroma"] = "ok"
     except Exception as e:
         health["checks"]["chroma"] = f"error: {str(e)}"

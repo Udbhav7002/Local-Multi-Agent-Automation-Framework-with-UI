@@ -2,13 +2,14 @@
 Unit tests for UIParser single-monitor bounds check and exception handling remediation.
 """
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 # Skip tests if heavy dependencies are not available
 pytesseract = pytest.importorskip("pytesseract")
 cv2 = pytest.importorskip("cv2")
 
-from vision.ui_parser import UIParser
+from vision.ui_parser import UIParser  # noqa: E402  (must follow importorskip guards)
 
 
 def test_ui_parser_single_monitor_bounds():
@@ -21,20 +22,20 @@ def test_ui_parser_single_monitor_bounds():
     mock_mss = MagicMock()
     mock_mss.__enter__.return_value = mock_sct
 
-    with patch("mss.mss", return_value=mock_mss):
-        with patch("cv2.cvtColor", return_value=MagicMock()):
-            with patch("cv2.threshold", return_value=(0, MagicMock())):
-                with patch("pytesseract.image_to_data") as mock_tess:
-                    mock_tess.return_value = {
-                        'text': ['submit'],
-                        'conf': [90],
-                        'left': [10],
-                        'top': [10],
-                        'width': [50],
-                        'height': [20]
-                    }
-                    result = parser._find_element_ocr("submit")
-                    assert result == (35, 20)
+    with patch("mss.mss", return_value=mock_mss), \
+         patch("cv2.cvtColor", return_value=MagicMock()), \
+         patch("cv2.threshold", return_value=(0, MagicMock())), \
+         patch("pytesseract.image_to_data") as mock_tess:
+        mock_tess.return_value = {
+            'text': ['submit'],
+            'conf': [90],
+            'left': [10],
+            'top': [10],
+            'width': [50],
+            'height': [20]
+        }
+        result = parser._find_element_ocr("submit")
+        assert result == (35, 20)
 
 
 def test_ui_parser_extract_all_text_single_monitor():
@@ -47,18 +48,18 @@ def test_ui_parser_extract_all_text_single_monitor():
     mock_mss = MagicMock()
     mock_mss.__enter__.return_value = mock_sct
 
-    with patch("mss.mss", return_value=mock_mss):
-        with patch("cv2.cvtColor", return_value=MagicMock()):
-            with patch("cv2.threshold", return_value=(0, MagicMock())):
-                with patch("pytesseract.image_to_data") as mock_tess:
-                    mock_tess.return_value = {
-                        'text': ['hello', 'world'],
-                        'conf': [90, 90],
-                        'block_num': [1, 1],
-                        'line_num': [1, 1]
-                    }
-                    text = parser.extract_all_text()
-                    assert text == "hello world"
+    with patch("mss.mss", return_value=mock_mss), \
+         patch("cv2.cvtColor", return_value=MagicMock()), \
+         patch("cv2.threshold", return_value=(0, MagicMock())), \
+         patch("pytesseract.image_to_data") as mock_tess:
+        mock_tess.return_value = {
+            'text': ['hello', 'world'],
+            'conf': [90, 90],
+            'block_num': [1, 1],
+            'line_num': [1, 1]
+        }
+        text = parser.extract_all_text()
+        assert text == "hello world"
 
 
 def test_ui_parser_ocr_uncaught_exceptions_graceful_fallback():

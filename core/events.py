@@ -2,9 +2,15 @@
 Event Bus module for decoupled communication between components.
 Implements the Observer pattern.
 """
+import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Dict, List, Any
+from typing import Any
+
+from core.logger import setup_logger
+
+logger = setup_logger("EventBus")
 
 
 @dataclass
@@ -13,7 +19,7 @@ class SystemEvent:
     timestamp: datetime = field(default_factory=datetime.now)
     source: str = "System"
     level: str = "INFO"
-    payload: Dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     message: str = ""
 
 @dataclass
@@ -51,7 +57,7 @@ class EventBus:
     Allows decoupling of logging, WebSockets, and inter-agent messaging.
     """
     def __init__(self):
-        self._subscribers: Dict[str, List[Callable[[SystemEvent], None]]] = {}
+        self._subscribers: dict[str, list[Callable[[SystemEvent], None]]] = {}
 
     def subscribe(self, event_type: str, callback: Callable[[SystemEvent], None]) -> None:
         """Subscribe a callback to a specific event type."""
@@ -62,10 +68,8 @@ class EventBus:
     def unsubscribe(self, event_type: str, callback: Callable[[SystemEvent], None]) -> None:
         """Unsubscribe a callback from an event type."""
         if event_type in self._subscribers:
-            try:
+            with contextlib.suppress(ValueError):
                 self._subscribers[event_type].remove(callback)
-            except ValueError:
-                pass
 
     def publish(self, event_type: str, event: SystemEvent) -> None:
         """Publish an event to all subscribers synchronously."""
@@ -75,5 +79,5 @@ class EventBus:
                     callback(event)
                 except Exception as e:
                     # Catch all so one broken subscriber doesn't crash the bus
-                    print(f"EventBus error notifying subscriber: {e}")
+                    logger.error("EventBus error notifying subscriber: %s", e)
 

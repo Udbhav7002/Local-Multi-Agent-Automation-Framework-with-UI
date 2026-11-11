@@ -6,7 +6,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Optional
 
 from core.config import config
 from core.logger import setup_logger
@@ -15,7 +15,7 @@ logger = setup_logger("CostTracker")
 
 # Pricing per 1M tokens (input, output) in USD
 # Updated as of 2025 - these are estimates
-MODEL_PRICING: Dict[str, tuple[float, float]] = {
+MODEL_PRICING: dict[str, tuple[float, float]] = {
     # OpenAI
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
@@ -109,6 +109,7 @@ class CostTracker:
     Enforces per-request and per-session budget limits.
     """
     _instance: Optional["CostTracker"] = None
+    _initialized: bool = False
 
     def __new__(cls) -> "CostTracker":
         if cls._instance is None:
@@ -213,7 +214,7 @@ class CostTracker:
         """Load session costs from disk."""
         try:
             if os.path.exists(self._session_file()):
-                with open(self._session_file(), "r") as f:
+                with open(self._session_file()) as f:
                     data = json.load(f)
                 self.session.total_cost_usd = data.get("total_cost_usd", 0.0)
                 self.session.total_input_tokens = data.get("total_input_tokens", 0)

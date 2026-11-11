@@ -4,7 +4,6 @@ Encapsulates all dangerous-command detection and user approval logic.
 """
 import asyncio
 import shlex
-from typing import Set
 
 from core.logger import setup_logger
 
@@ -23,7 +22,7 @@ class SafetyGate:
         self.prompt_loader = prompt_loader
         # Only these exact base binaries are allowed to run autonomously.
         # Keep this list highly restricted to read-only or harmless actions.
-        self.allowed_base_commands: Set[str] = {
+        self.allowed_base_commands: set[str] = {
             "ls", "echo", "pwd", "whoami", "date", "cat", "git status",
             "dir", "systeminfo", "mkdir", "touch"
         }
@@ -35,14 +34,14 @@ class SafetyGate:
         """Validates any action type, not just CLI commands."""
         if method == 'cli':
             return self.is_safe(target)
-        
+
         if method == 'browser' and action == 'goto':
             target_lower = target.lower().strip()
             for scheme in self.BLOCKED_URL_SCHEMES:
                 if target_lower.startswith(scheme):
                     logger.warning("Blocked dangerous URL scheme: %s", target)
                     return False
-        
+
         return True  # GUI actions and other browser actions pass by default
 
     def is_safe(self, command: str) -> bool:
@@ -57,15 +56,15 @@ class SafetyGate:
             parts = shlex.split(command)
             if not parts:
                 return False
-            
+
             base_binary = parts[0].lower()
-            
+
             # Explicitly block all script interpreters
             blocked = {"python3", "python", "bash", "sh", "zsh", "ruby", "node", "perl"}
             if base_binary in blocked:
                 logger.warning(f"Blocked explicitly forbidden interpreter: {base_binary}")
                 return False
-            
+
             # Identify chained commands or file redirections.
             # If the agent tries to pipe output or chain commands, force a manual review.
             unsafe_operators = ['&', '|', ';', '>', '<']

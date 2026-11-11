@@ -3,13 +3,15 @@ OpenTelemetry integration for tracing agent latency and execution paths.
 """
 import functools
 import time
-from typing import Callable, Any
+from collections.abc import Callable, Coroutine
+from typing import Any, ParamSpec, TypeVar
 
 from opentelemetry import trace
-from opentelemetry.trace import format_trace_id
-from core.logger import set_task_id
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.trace import format_trace_id
+
+from core.logger import set_task_id
 
 # Initialize OpenTelemetry
 provider = TracerProvider()
@@ -19,13 +21,16 @@ trace.set_tracer_provider(provider)
 
 tracer = trace.get_tracer("agent-automation")
 
-def trace_latency(name: str) -> Callable:
+T = TypeVar("T")
+P = ParamSpec("P")
+
+def trace_latency(name: str) -> Callable[[Callable[P, Coroutine[Any, Any, T]]], Callable[P, Coroutine[Any, Any, T]]]:
     """
     Decorator to measure and trace the latency of any async agent function.
     """
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[P, Coroutine[Any, Any, T]]) -> Callable[P, Coroutine[Any, Any, T]]:
         @functools.wraps(func)
-        async def wrapper(*args, **kwargs) -> Any:
+        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             with tracer.start_as_current_span(name) as span:
                 trace_id = format_trace_id(span.get_span_context().trace_id)
                 set_task_id(trace_id)

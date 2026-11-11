@@ -3,10 +3,9 @@ Startup health checks for the Multi-Agent Automation Framework.
 Verifies that all critical dependencies are available before
 the REPL loop starts, providing human-readable error messages.
 """
-import sys
 import shutil
 
-from core.logger import setup_logger, console
+from core.logger import console, setup_logger
 
 logger = setup_logger("HealthCheck")
 
@@ -81,7 +80,7 @@ def check_dependencies() -> bool:
             time.sleep(3)  # Give it a moment to bind to the port
             ollama.list()  # Try again
             console.print("  [#00ff00]✓[/#00ff00] [#888888]Ollama started successfully.[/#888888]")
-        except Exception as e:
+        except Exception:
             console.print(
                 "  [#ff0000]✗[/#ff0000] [bold]Cannot connect to or start Ollama.[/bold]"
             )
@@ -96,6 +95,7 @@ def check_dependencies() -> bool:
     # --- Model availability ---
     try:
         import ollama
+
         from core.config import config
         available_models = [m.get('name', m.get('model', '')) for m in ollama.list().get('models', [])]
         required_models = [config.manager_model, config.worker_model]

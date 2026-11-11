@@ -5,7 +5,6 @@ was previously duplicated across Planner and Worker.
 """
 import json
 import re
-from typing import Union
 
 from core.logger import setup_logger
 
@@ -18,7 +17,7 @@ class ResponseParser:
     Handles common LLM quirks: <think> blocks, markdown fences,
     trailing commas, and embedded prose around JSON.
     """
-    
+
     REQUIRED_STEP_KEYS = {"action", "target", "method"}
 
     @staticmethod
@@ -90,14 +89,14 @@ class ResponseParser:
             raise ValueError(
                 f"Worker step {step_index} is not a dict: {type(step).__name__}"
             )
-        
+
         missing = ResponseParser.REQUIRED_STEP_KEYS - set(step.keys())
         if missing:
             raise ValueError(
                 f"Worker step {step_index} missing required keys: {missing}. "
                 f"Got: {step}"
             )
-        
+
         # Validate types
         for key in ('action', 'target', 'method'):
             if not isinstance(step.get(key), str):
@@ -105,7 +104,7 @@ class ResponseParser:
                     f"Worker step {step_index} key '{key}' must be a string, "
                     f"got {type(step.get(key)).__name__}"
                 )
-        
+
         return step
 
     @staticmethod
@@ -123,10 +122,10 @@ class ResponseParser:
             raise ValueError(
                 f"Expected list or dict from Worker, got {type(data).__name__}"
             )
-        
+
         # Validate each step
         validated = []
         for i, step in enumerate(data):
             validated.append(ResponseParser.validate_action_step(step, i))
-        
+
         return validated

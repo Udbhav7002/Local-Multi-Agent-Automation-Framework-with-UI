@@ -1,6 +1,5 @@
 import os
-import string
-from typing import Optional, Any, Dict
+from typing import Any
 
 import yaml
 
@@ -18,15 +17,15 @@ class PromptLoader:
 
     def __init__(self, prompts_dir: str = _PROMPTS_DIR) -> None:
         self._dir = prompts_dir
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache: dict[str, dict[str, Any]] = {}
 
-    def _load_file(self, agent_name: str) -> Dict[str, Any]:
+    def _load_file(self, agent_name: str) -> dict[str, Any]:
         if agent_name in self._cache:
             return self._cache[agent_name]
         path = os.path.join(self._dir, f"{agent_name}.yaml")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Prompt file not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
             if not isinstance(data, dict):
                 raise ValueError(f"Prompt file {path} must contain a YAML mapping, got {type(data).__name__}")
@@ -41,12 +40,12 @@ class PromptLoader:
 
     def load(self, agent_name: str, key: str = "system_prompt", **kwargs) -> str:
         """Load a prompt template and render it with the given variables.
-        
+
         Args:
             agent_name: The name of the agent (e.g., 'planner', 'worker').
             key: The YAML key to load (default: 'system_prompt').
             **kwargs: Template variables to substitute (e.g., os_context='...').
-        
+
         Returns:
             The rendered prompt string.
         """

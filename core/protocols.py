@@ -4,36 +4,36 @@ Protocols (Interfaces) for the Multi-Agent Automation Framework.
 This module enforces SOLID principles by ensuring the Orchestrator
 and other top-level components depend on abstractions, not concretions.
 """
-from typing import Protocol, Optional, Any, Dict, List, Union, AsyncGenerator
-from typing import runtime_checkable
+from collections.abc import AsyncGenerator
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class LLMClient(Protocol):
     """Abstract interface for LLM chat completion."""
-    
+
     async def chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
         """Send a chat completion request and return the content string."""
         ...
-    
+
     async def stream_chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         """Send a chat completion request and stream the response tokens."""
         ...
-    
+
     async def close(self) -> None:
         """Close the underlying client session."""
         ...
@@ -74,14 +74,14 @@ class TaskCritic(Agent, Protocol):
 class IntentRouter(Agent, Protocol):
     """Interface for agents that classify the user's intent."""
     llm: LLMClient
-    async def classify(self, user_text: str) -> tuple[str, Optional[Any]]:
+    async def classify(self, user_text: str) -> tuple[str, Any | None]:
         ...
 
 
 @runtime_checkable
 class MemoryStore(Protocol):
     """Interface for episodic and semantic memory storage."""
-    async def get_plan(self, task_description: str) -> Optional[str]:
+    async def get_plan(self, task_description: str) -> str | None:
         ...
 
     async def save_plan(self, task_description: str, plan_json: str) -> None:
@@ -92,13 +92,13 @@ class MemoryStore(Protocol):
 
     async def save_failure(self, task_description: str, failed_plan: str, reason: str) -> None:
         ...
-        
+
     async def save_episode(self, episode_data: dict) -> None:
         ...
-        
+
     async def get_similar_episodes(self, task_description: str, limit: int = 3) -> list[dict]:
         ...
-        
+
     async def close(self) -> None:
         """Gracefully release resources (e.g. database locks)."""
         ...
@@ -109,22 +109,22 @@ class SkillLibrary(Protocol):
     """Interface for skill library operations."""
     def save_skill(self, task_description: str, plan_json: str) -> None:
         ...
-    
+
     def mark_failure(self, task_description: str) -> None:
         ...
-    
-    def get_skill_plan(self, task_description: str) -> Optional[str]:
+
+    def get_skill_plan(self, task_description: str) -> str | None:
         ...
 
 
 @runtime_checkable
 class AgentLoader(Protocol):
     """Interface for custom agent loader."""
-    agents: Dict[str, Any]
-    
-    def match(self, user_text: str) -> Optional[Any]:
+    agents: dict[str, Any]
+
+    def match(self, user_text: str) -> Any | None:
         ...
-    
+
     def get_agent_summary(self) -> str:
         ...
 
@@ -133,7 +133,9 @@ class AgentLoader(Protocol):
 class StepRunnerProtocol(Protocol):
     """Interface for the engine that executes the physical steps."""
     verifier: Any
-    async def run(self, steps: List[str]) -> tuple[bool, str, List[Dict[str, Any]]]:
+    async def run(self, steps: list[str]) -> tuple[bool, str, list[dict[str, Any]]]:
         ...
     async def rollback(self, n: int = -1) -> None:
+        ...
+    def cancel(self) -> None:
         ...

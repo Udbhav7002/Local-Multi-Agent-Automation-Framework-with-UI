@@ -2,10 +2,10 @@
 User preferences tracking.
 """
 import asyncio
-import os
 import json
+import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any
 
 from core.logger import setup_logger
 
@@ -17,7 +17,7 @@ _PREFS_FILE = os.path.join(_PROJECT_ROOT, "user_preferences.json")
 class UserPreferences:
     """Tracks and saves user preferences and app usage habits."""
     def __init__(self) -> None:
-        self.prefs: Dict[str, Any] = {
+        self.prefs: dict[str, Any] = {
             "apps_used": {},
             "last_updated": ""
         }
@@ -25,10 +25,10 @@ class UserPreferences:
 
     async def load(self) -> None:
         """Load preferences from disk asynchronously."""
-        if os.path.exists(_PREFS_FILE):
+        if await asyncio.to_thread(os.path.exists, _PREFS_FILE):
             try:
                 def read_file():
-                    with open(_PREFS_FILE, "r", encoding="utf-8") as f:
+                    with open(_PREFS_FILE, encoding="utf-8") as f:
                         return json.load(f)
                 data = await asyncio.to_thread(read_file)
                 self.prefs.update(data)
@@ -50,11 +50,11 @@ class UserPreferences:
         """Log that an application was used."""
         if not app_name or app_name.strip() == "":
             return
-            
+
         if "apps_used" not in self.prefs:
             self.prefs["apps_used"] = {}
-            
-        apps_used: Dict[str, int] = self.prefs["apps_used"]  # type: ignore[assignment]
+
+        apps_used: dict[str, int] = self.prefs["apps_used"]
         count = apps_used.get(app_name, 0)
         apps_used[app_name] = count + 1
         await self.save()
@@ -64,9 +64,9 @@ class UserPreferences:
         apps = self.prefs.get("apps_used", {})
         if not apps:
             return ""
-        
+
         # Sort by usage count descending
         sorted_apps = sorted(apps.items(), key=lambda x: x[1], reverse=True)
         top_apps = [name for name, _ in sorted_apps[:3]]
-        
+
         return f"User's most frequently used apps: {', '.join(top_apps)}."

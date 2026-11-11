@@ -1,6 +1,8 @@
 import os
+from typing import Any
+
 import yaml
-from typing import Dict, List, Any
+
 from core.logger import setup_logger
 
 logger = setup_logger("AgentSkillLoader")
@@ -13,9 +15,9 @@ class AgentSkillLoader:
     Loads Agent Skills (Claude Skills format) from the agent_skills/ directory.
     Skills are directories containing a SKILL.md file with YAML frontmatter.
     """
-    
+
     def __init__(self) -> None:
-        self.skills: Dict[str, Dict[str, Any]] = {}
+        self.skills: dict[str, dict[str, Any]] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -34,11 +36,11 @@ class AgentSkillLoader:
                 continue
 
             try:
-                with open(skill_file, "r", encoding="utf-8") as f:
+                with open(skill_file, encoding="utf-8") as f:
                     content = f.read()
 
                 # Parse YAML frontmatter
-                metadata = {}
+                metadata: dict = {}
                 body = content
                 if content.startswith("---"):
                     parts = content.split("---", 2)
@@ -51,7 +53,7 @@ class AgentSkillLoader:
 
                 name = metadata.get("name", entry)
                 description = metadata.get("description", "No description provided.")
-                
+
                 self.skills[entry] = {
                     "id": entry,
                     "name": name,
@@ -67,13 +69,13 @@ class AgentSkillLoader:
         """Returns a summarized string of all available Agent Skills."""
         if not self.skills:
             return ""
-        
+
         summary = "[AVAILABLE AGENT SKILLS (Claude Skills Hub)]\\n"
         summary += "The user has installed the following domain-expert skills. If the task relates to these domains, YOU MUST STRICTLY follow the instructions in the skill body below.\\n\\n"
-        
+
         for skill_id, data in self.skills.items():
             summary += f"--- SKILL: {data['name']} (ID: {skill_id}) ---\\n"
             summary += f"DESCRIPTION: {data['description']}\\n"
             summary += f"INSTRUCTIONS:\\n{data['body']}\\n\\n"
-            
+
         return summary

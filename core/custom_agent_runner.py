@@ -1,7 +1,9 @@
 import json
+
 from rich.panel import Panel
-from core.logger import setup_logger, console
+
 from core.agent_loader import CustomAgent
+from core.logger import console, setup_logger
 
 logger = setup_logger("CustomAgentRunner")
 

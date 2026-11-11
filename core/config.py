@@ -5,11 +5,11 @@ Configuration module for the Local Multi-Agent Automation Framework.
 # 1. settings.json (runtime-persisted via Config.save())
 # 2. Environment variables (or .env file)
 # 3. Pydantic Defaults below
-import os
 import json
-import platform
 import logging
-from typing import Dict, Any
+import os
+import platform
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -66,8 +66,8 @@ class Config(BaseSettings):
     # Execution limits
     cli_timeout_seconds: float = 60.0
     cli_max_output_chars: int = 2000
-    
-    action_timeouts: Dict[str, float] = Field(default_factory=lambda: {
+
+    action_timeouts: dict[str, float] = Field(default_factory=lambda: {
         "run_command": 60.0,
         "open_app": 10.0,
         "click": 15.0,
@@ -91,30 +91,30 @@ class Config(BaseSettings):
         system = platform.system()  # 'Darwin', 'Linux', 'Windows'
         machine = platform.machine()  # 'arm64', 'x86_64', etc.
 
-        if system == "Darwin":
-            return (
+        contexts = {
+            "Darwin": (
                 f"You are running on macOS ({machine}). "
                 "Use macOS apps (Finder, Terminal, Safari, Notes, Preview) and macOS CLI tools "
                 "(open, df, diskutil, pmset, say, pbcopy, osascript). "
                 "NEVER use Windows apps (File Explorer, Command Prompt, PowerShell) or "
                 "Windows commands (wmic, dir, ipconfig)."
-            )
-        elif system == "Linux":
-            return (
+            ),
+            "Linux": (
                 f"You are running on Linux ({machine}). "
                 "Use Linux apps (Nautilus, gnome-terminal, Firefox) and Linux CLI tools "
                 "(df, free, lsblk, xdg-open, xdotool). "
                 "NEVER use Windows or macOS specific apps or commands."
-            )
-        elif system == "Windows":
-            return (
+            ),
+            "Windows": (
                 f"You are running on Windows ({machine}). "
                 "Use Windows apps (File Explorer, Command Prompt, PowerShell, Notepad) and "
                 "Windows CLI tools (wmic, dir, ipconfig, systeminfo). "
                 "NEVER use macOS or Linux specific apps or commands."
-            )
-        else:
-            return f"You are running on {system} ({machine})."
+            ),
+        }
+        if system in contexts:
+            return contexts[system]
+        return f"You are running on {system} ({machine})."
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
@@ -123,7 +123,7 @@ class Config(BaseSettings):
         # Load from settings.json (highest precedence for runtime overrides)
         if os.path.exists(SETTINGS_FILE):
             try:
-                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                with open(SETTINGS_FILE, encoding="utf-8") as f:
                     data = json.load(f)
                 for k, v in data.items():
                     if hasattr(self, k):

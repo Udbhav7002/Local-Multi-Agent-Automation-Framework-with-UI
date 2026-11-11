@@ -4,38 +4,37 @@ Place this file in the plugins/ directory to extend the framework with custom ac
 
 This plugin demonstrates how to add custom actions that can be invoked by the Worker agent.
 """
-import asyncio
-from typing import Any, Dict, List, Tuple
-from core.executor.base import BaseExecutor
+from collections.abc import Callable
+from typing import Any
 
 
 class ExamplePlugin:
     """
     Example plugin that adds custom actions for demonstration purposes.
-    
+
     To use this plugin:
     1. Place this file in the plugins/ directory
     2. Restart the framework
     3. The Worker can now use actions like "custom_greet" and "custom_math"
     """
-    
+
     # Required: The name of this plugin (for logging)
     PLUGIN_NAME = "ExamplePlugin"
-    
+
     # Required: List of action names this plugin handles
     ACTIONS = ["custom_greet", "custom_math", "custom_echo"]
-    
+
     def __init__(self) -> None:
         pass
-    
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         """
         Execute a custom action.
-        
+
         Args:
             action: The action name (e.g., "custom_greet")
             target: The target parameter (e.g., "Alice" for greet)
-            
+
         Returns:
             Tuple of (success: bool, output: str)
         """
@@ -50,20 +49,20 @@ class ExamplePlugin:
                 return False, f"Unknown action: {action}"
         except Exception as e:
             return False, f"Plugin error: {str(e)}"
-    
-    async def _greet(self, name: str) -> Tuple[bool, str]:
+
+    async def _greet(self, name: str) -> tuple[bool, str]:
         """Custom greeting action."""
         return True, f"Hello, {name}! This is a custom plugin action."
-    
-    async def _math(self, expression: str) -> Tuple[bool, str]:
+
+    async def _math(self, expression: str) -> tuple[bool, str]:
         """Evaluate a simple math expression safely."""
         try:
             # Safe math evaluation using ast.literal_eval for numbers and basic operators
             import ast
             import operator
-            
+
             # Only allow basic arithmetic
-            allowed_operators = {
+            allowed_operators: dict[type, Callable[..., Any]] = {
                 ast.Add: operator.add,
                 ast.Sub: operator.sub,
                 ast.Mult: operator.mul,
@@ -72,14 +71,14 @@ class ExamplePlugin:
                 ast.USub: operator.neg,
                 ast.UAdd: operator.pos,
             }
-            
-            def eval_node(node):
+
+            def eval_node(node: ast.expr) -> Any:
                 if isinstance(node, ast.Constant):
                     return node.value
                 elif isinstance(node, ast.BinOp):
                     left = eval_node(node.left)
                     right = eval_node(node.right)
-                    op_type = type(node.op)
+                    op_type: type = type(node.op)
                     if op_type in allowed_operators:
                         return allowed_operators[op_type](left, right)
                     raise ValueError(f"Unsupported operator: {op_type}")
@@ -91,14 +90,14 @@ class ExamplePlugin:
                     raise ValueError(f"Unsupported unary operator: {op_type}")
                 else:
                     raise ValueError(f"Unsupported expression type: {type(node)}")
-            
+
             tree = ast.parse(expression, mode='eval')
             result = eval_node(tree.body)
             return True, f"Result: {result}"
         except Exception as e:
             return False, f"Math error: {str(e)}"
-    
-    async def _echo(self, text: str) -> Tuple[bool, str]:
+
+    async def _echo(self, text: str) -> tuple[bool, str]:
         """Echo back the input text."""
         return True, f"Echo: {text}"
 

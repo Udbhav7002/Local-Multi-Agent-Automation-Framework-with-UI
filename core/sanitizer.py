@@ -2,6 +2,7 @@
 Input Sanitizer module to defend against prompt injection and jailbreaks.
 """
 import re
+
 from core.logger import setup_logger
 
 logger = setup_logger("InputSanitizer")
@@ -25,7 +26,7 @@ class InputSanitizer:
             r"(?i)forget\s+what\s+I\s+told\s+you",
             r"(?i)forget\s+your\s+previous",
         ]
-        
+
         # Detect delimiter overloads (e.g., trying to close a prompt boundary)
         self.delimiter_patterns = [
             r"\[/SYSTEM\]",
@@ -60,9 +61,9 @@ class InputSanitizer:
                 raise PromptInjectionError("Input contains restricted structural delimiters.")
 
         # 3. Limit input size to prevent DoS via massive token contexts
-        MAX_INPUT_LENGTH = 10000
-        if len(cleaned) > MAX_INPUT_LENGTH:
-            logger.warning(f"Input truncated from {len(cleaned)} to {MAX_INPUT_LENGTH} characters.")
-            cleaned = cleaned[:MAX_INPUT_LENGTH]
+        max_input_length = 10000
+        if len(cleaned) > max_input_length:
+            logger.warning(f"Input truncated from {len(cleaned)} to {max_input_length} characters.")
+            cleaned = cleaned[:max_input_length]
 
         return cleaned

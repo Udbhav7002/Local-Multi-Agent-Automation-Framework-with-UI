@@ -1,5 +1,6 @@
-import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+
 from core.safety_gate import SafetyGate
 
 # Initialize the safety gate
@@ -16,7 +17,7 @@ def test_safety_gate_blocks_unsafe_commands(cmd, flag, path):
     """Property test: Ensures unsafe commands are always blocked regardless of flags or paths."""
     full_command = f"{cmd} {flag} {path}".strip()
     is_safe = gate.is_safe_action("run_command", full_command, "cli")
-    
+
     # If the command starts with an unsafe keyword, it should generally be blocked
     # (SafetyGate might be implemented with a blacklist)
     assert not is_safe, f"SafetyGate failed to block unsafe command: {full_command}"
@@ -26,7 +27,8 @@ def test_safety_gate_allows_safe_commands(cmd, flag, path):
     """Property test: Ensures safe commands are generally allowed (unless they hit a specific blocklist)."""
     full_command = f"{cmd} {flag} {path}".strip()
     is_safe = gate.is_safe_action("run_command", full_command, "cli")
-    
+    assert isinstance(is_safe, bool)
+
     # Some combinations might still be blocked (e.g. if the path contains something dangerous)
     # But generally these should pass if the core command is safe.
     # Note: If the current SafetyGate is very strict, this might fail, but it serves as a contract.

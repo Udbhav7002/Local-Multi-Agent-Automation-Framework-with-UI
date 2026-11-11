@@ -2,12 +2,13 @@
 Logger module for standardized output across all framework components.
 Uses rich for a clean, premium terminal look without emojis.
 """
+import contextvars
 import logging
 import os
 import re
-import contextvars
-from rich.logging import RichHandler
+
 from rich.console import Console
+from rich.logging import RichHandler
 
 # Correlation ID for tracking individual task executions
 _task_id: contextvars.ContextVar[str] = contextvars.ContextVar('task_id', default='')
@@ -36,7 +37,7 @@ class PiiFilter(logging.Filter):
         (re.compile(r'(password|passwd|pwd|secret|key|token)\s*[:=]\s*\S+', re.I), r'\1=[REDACTED]'),
         (re.compile(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'), '[CREDIT_CARD]'),
     ]
-    
+
     def filter(self, record):
         msg = str(record.getMessage())
         for pattern, replacement in self.PATTERNS:
@@ -67,7 +68,7 @@ def setup_logger(name: str) -> logging.Logger:
         rich_tracebacks=True,
         markup=True
     )
-    
+
     # We need a dynamic formatter because task_id can change
     class RichDynamicFormatter(logging.Formatter):
         def format(self, record):
@@ -98,7 +99,7 @@ def setup_logger(name: str) -> logging.Logger:
 
         log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
         os.makedirs(log_dir, exist_ok=True)
-            
+
         file_handler = logging.FileHandler(os.path.join(log_dir, "framework.jsonl"))
         file_handler.setFormatter(JsonFormatter())
         logger.addHandler(file_handler)

@@ -1,6 +1,5 @@
 import asyncio
-from typing import Tuple
-from core.executor.base import BaseExecutor
+
 
 class MailPlugin:
     """
@@ -12,14 +11,14 @@ class MailPlugin:
     def __init__(self) -> None:
         pass
 
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         if action == "check_mail":
             return await self._check_mail()
         elif action == "read_important_mail":
             return await self._check_mail(limit=int(target) if target.isdigit() else 5)
         return False, f"Unknown action: {action}"
 
-    async def _check_mail(self, limit: int = 5) -> Tuple[bool, str]:
+    async def _check_mail(self, limit: int = 5) -> tuple[bool, str]:
         script = f"""
         tell application "Mail"
             try
@@ -27,10 +26,10 @@ class MailPlugin:
                 if (count of unreadMsgs) = 0 then
                     return "No unread emails."
                 end if
-                
+
                 set output to "📬 Recent Unread Emails:\\n\\n"
                 set msgCount to 0
-                
+
                 repeat with msg in unreadMsgs
                     if msgCount >= {limit} then exit repeat
                     set output to output & "From: " & sender of msg & "\\n"
@@ -39,7 +38,7 @@ class MailPlugin:
                     set output to output & "----------------------------------------\\n"
                     set msgCount to msgCount + 1
                 end repeat
-                
+
                 return output
             on error errMsg
                 return "Error accessing Mail: " & errMsg

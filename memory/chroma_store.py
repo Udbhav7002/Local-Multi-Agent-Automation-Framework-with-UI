@@ -1,10 +1,9 @@
 """
 Memory module for storing and retrieving successful and failed plans using ChromaDB.
 """
+import asyncio
 import os
 import uuid
-import asyncio
-from typing import Optional, List, Dict, Any
 
 import chromadb
 
@@ -22,7 +21,7 @@ class ChromaStore:
     """
     Handles interactions with ChromaDB for semantic memory retrieval.
     Stores past execution plans and their success/failure states.
-    
+
     WARNING: Task descriptions and plans are stored unencrypted in the local
     ChromaDB database. Do not include sensitive data (passwords, API keys, etc.)
     in task descriptions. The database is stored at: <project_root>/chroma_db/
@@ -38,24 +37,25 @@ class ChromaStore:
         self.episodes_collection = self.client.get_or_create_collection(
             name="episodes")
 
-    def _sync_get_plan(self, task_description: str) -> Optional[str]:
+    def _sync_get_plan(self, task_description: str) -> str | None:
         try:
             results = self.success_collection.query(
                 query_texts=[task_description],
                 n_results=1
             )
-            if results and results.get('documents') and len(
-                    results['documents'][0]) > 0:
-                distance = results['distances'][0][0]
+            documents = results.get('documents')
+            distances = results.get('distances')
+            if documents and distances and len(documents[0]) > 0:
+                distance = distances[0][0]
                 if distance < config.memory_success_threshold:
                     logger.debug("Found cached plan with distance: %s", distance)
-                    return str(results['documents'][0][0])
+                    return str(documents[0][0])
             return None
         except (ValueError, OSError) as e:
             logger.error("Error querying success collection: %s", e)
             return None
 
-    async def get_plan(self, task_description: str) -> Optional[str]:
+    async def get_plan(self, task_description: str) -> str | None:
         """Query ChromaDB for an exact or highly similar task."""
         return await asyncio.to_thread(self._sync_get_plan, task_description)
 
@@ -81,12 +81,15 @@ class ChromaStore:
                 query_texts=[task_description],
                 n_results=3
             )
+            documents = results.get('documents')
+            distances = results.get('distances')
+            metadatas = results.get('metadatas')
             failures = []
-            if results and results.get('documents') and len(results['documents']) > 0:
-                for idx, doc in enumerate(results['documents'][0]):
-                    distance = results['distances'][0][idx]
+            if documents and distances and metadatas and len(documents) > 0:
+                for idx, doc in enumerate(documents[0]):
+                    distance = distances[0][idx]
                     if distance < config.memory_failure_threshold:
-                        reason = results['metadatas'][0][idx].get('reason', 'Unknown reason')
+                        reason = metadatas[0][idx].get('reason', 'Unknown reason')
                         failures.append({'plan': doc, 'reason': reason})
             return failures
         except (ValueError, OSError) as e:
@@ -139,9 +142,11 @@ class ChromaStore:
                 n_results=limit
             )
             episodes = []
-            if results and results.get('documents') and len(results['documents']) > 0:
-                for idx, doc in enumerate(results['documents'][0]):
-                    distance = results['distances'][0][idx]
+            documents = results.get('documents')
+            distances = results.get('distances')
+            if documents and distances and len(documents) > 0:
+                for idx, doc in enumerate(documents[0]):
+                    distance = distances[0][idx]
                     if distance < config.memory_episode_threshold:
                         try:
                             ep_dict = json.loads(doc)
@@ -163,22 +168,22 @@ class ChromaStore:
             results = self.episodes_collection.get()
             if not results or not results.get('ids'):
                 return 0
-                
+
             ids = results['ids']
             if len(ids) <= max_episodes:
                 return 0
-                
+
             # Prune older episodes (insertion order)
             excess = len(ids) - max_episodes
             ids_to_delete = ids[:excess]
-            
+
             self.episodes_collection.delete(ids=ids_to_delete)
             logger.info("Summarized/Pruned %d old episodes from ChromaDB to maintain speed.", len(ids_to_delete))
             return len(ids_to_delete)
         except Exception as e:
             logger.error("Error summarizing episodes: %s", e)
             return 0
-            
+
     async def summarize_old_episodes(self, max_episodes: int = 100) -> int:
         """Run a background job to summarize and prune old episodic memories."""
         return await asyncio.to_thread(self._sync_summarize_old_episodes, max_episodes)
@@ -187,24 +192,15 @@ class ChromaStore:
         """Gracefully release the ChromaDB connection."""
         try:
             logger.debug("Closing ChromaStore...")
-            self.success_collection = None
-            self.failure_collection = None
-            self.episodes_collection = None
-            if self.client is not None:
-                del self.client
-                self.client = None
+            for attr in ("success_collection", "failure_collection", "episodes_collection", "client"):
+                if hasattr(self, attr):
+                    delattr(self, attr)
             logger.debug("ChromaStore closed successfully.")
         except Exception as e:
             logger.error("Error closing ChromaStore: %s", e)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        await self.close()

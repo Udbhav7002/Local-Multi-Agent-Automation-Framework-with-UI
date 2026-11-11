@@ -4,23 +4,23 @@ Handles dependency injection and instantiating the entire framework
 from configuration. This keeps main.py perfectly clean.
 """
 
+from core.agent_loader import AgentLoader
 from core.config import config
+from core.critic import Critic
+from core.executor import ExecutorDispatcher
 from core.llm_client import MultiLLMClient
+from core.orchestrator import Orchestrator
+from core.planner import Planner
 from core.prompt_loader import PromptLoader
 from core.router import Router
-from core.planner import Planner
-from core.critic import Critic
-from core.worker import Worker
-from core.step_runner import StepRunner
-from core.executor import ExecutorDispatcher
 from core.safety_gate import SafetyGate
-from core.orchestrator import Orchestrator
-from core.agent_loader import AgentLoader
-from vision.verifier import VisionVerifier
-from vision.ui_parser import UIParser
+from core.step_runner import StepRunner
+from core.worker import Worker
 from memory.chroma_store import ChromaStore
 from memory.preferences import UserPreferences
 from memory.skill_library import SkillLibrary
+from vision.ui_parser import UIParser
+from vision.verifier import VisionVerifier
 
 
 class FrameworkBuilder:
@@ -34,7 +34,7 @@ class FrameworkBuilder:
         # Register default event subscribers for observability
         from core.logger import setup_logger
         _event_logger = setup_logger("EventBus")
-        
+
         def _log_event(event):
             level = getattr(event, 'level', 'INFO').upper()
             msg = getattr(event, 'message', str(event))
@@ -46,7 +46,7 @@ class FrameworkBuilder:
                 _event_logger.error(msg)
             else:
                 _event_logger.info(msg)
-        
+
         event_bus.subscribe("agent_action", _log_event)
         event_bus.subscribe("step_executed", _log_event)
         event_bus.subscribe("task_started", _log_event)

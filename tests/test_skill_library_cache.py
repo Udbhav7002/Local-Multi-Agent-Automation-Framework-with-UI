@@ -1,10 +1,12 @@
 """
 Unit tests for SkillLibrary in-memory caching and semantic deduplication.
 """
-import os
-import json
 import builtins
+import json
+import os
+
 import pytest
+
 from memory.skill_library import SkillLibrary
 
 
@@ -145,7 +147,7 @@ def test_empty_or_missing_dir(tmp_path):
 def test_empty_and_whitespace_task_description_validation(tmp_path):
     skills_dir = str(tmp_path)
     lib = SkillLibrary(skills_dir=skills_dir)
-    
+
     # Pre-populate a skill
     lib.save_skill("open web page", '{"steps": ["open browser"]}')
     assert len(lib._cache) == 1
@@ -172,10 +174,10 @@ def test_empty_and_whitespace_task_description_validation(tmp_path):
 def test_no_substring_false_positive(tmp_path):
     skills_dir = str(tmp_path)
     lib = SkillLibrary(skills_dir=skills_dir)
-    
+
     # Save a short 1-step skill
     lib.save_skill("open safari", '{"steps": ["open safari"]}')
-    
+
     # Looking up a much longer multi-step task containing the substring should NOT match
     assert lib.get_skill_plan("open safari and search black mytrh wuokung") is None
 

@@ -1,10 +1,10 @@
 """
 Execution policies for determining how to handle a user request.
 """
-from typing import Optional, Tuple
 from enum import Enum, auto
+from typing import Any
 
-from core.protocols import MemoryStore, SkillLibrary, IntentRouter, AgentLoader
+from core.protocols import AgentLoader, IntentRouter, MemoryStore, SkillLibrary
 
 
 class PolicyResolution(Enum):
@@ -27,14 +27,14 @@ class ExecutionPolicy:
         memory: MemoryStore,
         skill_library: SkillLibrary,
         router: IntentRouter,
-        agent_loader: AgentLoader
+        agent_loader: AgentLoader | None
     ):
         self.memory = memory
         self.skill_library = skill_library
         self.router = router
         self.agent_loader = agent_loader
 
-    async def resolve(self, user_text: str) -> Tuple[PolicyResolution, Optional[str]]:
+    async def resolve(self, user_text: str) -> tuple[PolicyResolution, Any]:
         """
         Resolves the policy for the user_text.
         Returns a tuple of (PolicyResolution, Payload).

@@ -9,11 +9,11 @@ import inspect
 import os
 import platform
 import traceback
-from typing import Any, Dict, Tuple, Union
+from typing import Any
 
+from core.config import config
 from core.logger import setup_logger
 from core.models import ActionStep, MethodType
-from core.config import config
 
 from .base import BaseExecutor
 
@@ -30,7 +30,7 @@ class SystemExecutor:
         self._cli = cli_executor
         self._browser = browser_executor
 
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         """Execute a system-level action."""
         if action == "sleep":
             try:
@@ -55,7 +55,7 @@ class SystemExecutor:
                 app_name = os.path.splitext(app_name)[0]
 
             logger.info("Opening application: %s...", app_name)
-            
+
             system = platform.system()
             try:
                 if system == "Darwin":
@@ -76,7 +76,7 @@ class SystemExecutor:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                
+
                 stdout, stderr = await proc.communicate()
                 if proc.returncode == 0:
                     return True, f"Opened application: {app_name}"
@@ -102,15 +102,15 @@ class ExecutorDispatcher:
         self,
         ui_parser: Any = None,
         *,
-        strategies: Dict[MethodType, BaseExecutor] | None = None,
+        strategies: dict[MethodType, BaseExecutor] | None = None,
     ) -> None:
         if strategies is not None:
-            self._strategies: Dict[MethodType, Any] = dict(strategies)
+            self._strategies: dict[MethodType, Any] = dict(strategies)
         else:
             # Build default strategies — matches original Executor(ui_parser) API
+            from .browser_executor import BrowserExecutor  # pylint: disable=import-outside-toplevel
             from .cli_executor import CLIExecutor  # pylint: disable=import-outside-toplevel
             from .gui_executor import GUIExecutor  # pylint: disable=import-outside-toplevel
-            from .browser_executor import BrowserExecutor  # pylint: disable=import-outside-toplevel
 
             cli = CLIExecutor()
             browser = BrowserExecutor()
@@ -125,12 +125,12 @@ class ExecutorDispatcher:
             }
 
         # Action-based plugin registry (action_name -> plugin_instance)
-        self._action_plugins: Dict[str, Any] = {}
+        self._action_plugins: dict[str, Any] = {}
         self._load_plugins()
 
     async def execute_step(
-        self, step: Union[Dict[str, Any], ActionStep]
-    ) -> Tuple[bool, str]:
+        self, step: dict[str, Any] | ActionStep
+    ) -> tuple[bool, str]:
         """
         Execute a single planned step.
 
@@ -138,10 +138,7 @@ class ExecutorDispatcher:
             step: Either a raw dict (backward compat) or an ActionStep dataclass.
         """
         try:
-            if isinstance(step, dict):
-                action_step = ActionStep.from_dict(step)
-            else:
-                action_step = step
+            action_step = ActionStep.from_dict(step) if isinstance(step, dict) else step
 
             from enum import Enum
             method = action_step.method.value if isinstance(action_step.method, Enum) else action_step.method
@@ -155,14 +152,14 @@ class ExecutorDispatcher:
 
             # Check action-based plugins first
             plugin = self._action_plugins.get(action)
-            
+
             # Fallback to standard method strategy - convert method string to MethodType enum
             try:
                 method_enum = MethodType(method) if isinstance(method, str) else method
             except ValueError:
                 method_enum = MethodType.CLI  # fallback
             strategy = self._strategies.get(method_enum)
-            
+
             if plugin is None and strategy is None:
                 error_msg = f"Unknown execution method: {method}"
                 logger.warning(error_msg)
@@ -220,7 +217,7 @@ class ExecutorDispatcher:
 
                 # Find classes with an execute method
                 for _, obj in inspect.getmembers(module, inspect.isclass):
-                    if not hasattr(obj, 'execute') or not callable(getattr(obj, 'execute')):
+                    if not hasattr(obj, 'execute') or not callable(obj.execute):
                         continue
                     # Skip the BaseExecutor protocol itself
                     if obj.__name__ == 'BaseExecutor':

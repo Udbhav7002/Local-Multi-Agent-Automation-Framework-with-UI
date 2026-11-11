@@ -4,16 +4,30 @@ Pure Terminal/CLI implementation with rich interactive dashboard.
 """
 # pylint: disable=broad-exception-caught, line-too-long
 
-import asyncio
-import sys
 import argparse
-import signal
-import os
-import sqlite3
-import platform
+import asyncio
 import json
-import urllib.request
+import os
+import platform
 import re
+import signal
+import sqlite3
+import sys
+import urllib.request
+
+from rich import box
+from rich.columns import Columns
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
+
+from core.config import config
+from core.factory import FrameworkBuilder
+from core.health_check import check_dependencies
+from core.logger import console, setup_logger
+from core.orchestrator import Orchestrator
+from core.voice import VoiceInput
+
 
 def _hide_dock_icon():
     if sys.platform == 'darwin':
@@ -25,20 +39,6 @@ def _hide_dock_icon():
             app.setActivationPolicy_(2)
         except ImportError:
             pass
-
-from rich.prompt import Prompt
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
-from rich.columns import Columns
-from rich.align import Align
-
-from core.config import config
-from core.factory import FrameworkBuilder
-from core.orchestrator import Orchestrator
-from core.health_check import check_dependencies
-from core.logger import setup_logger, console
-from core.voice import VoiceInput
 
 logger = setup_logger("Main")
 
@@ -65,19 +65,19 @@ def draw_splash_screen(router_model: str, planner_model: str, vision_model: str)
     """Draws a premium, practical terminal dashboard on startup."""
 
     ascii_art = """[bold cyan]
-  ███████ ████████  █████  ██████  ████████ 
-  ██         ██    ██   ██ ██   ██    ██    
-  ███████    ██    ███████ ██████     ██    
-       ██    ██    ██   ██ ██   ██    ██    
-  ███████    ██    ██   ██ ██   ██    ██    
+  ███████ ████████  █████  ██████  ████████
+  ██         ██    ██   ██ ██   ██    ██
+  ███████    ██    ███████ ██████     ██
+       ██    ██    ██   ██ ██   ██    ██
+  ███████    ██    ██   ██ ██   ██    ██
 [/bold cyan]"""
 
     console.print(ascii_art)
-    
+
     ollama_ok, ollama_msg = _get_ollama_status()
     status_pill = "[bold green]● SYSTEM READY[/bold green]" if ollama_ok else "[bold yellow]⚠ OLLAMA OFFLINE[/bold yellow]"
     os_name = f"{platform.system()} ({platform.machine()})"
-    
+
     status_bar = f"  {status_pill}   |   [bold white]OS:[/bold white] {os_name}   |   [bold white]Ollama:[/bold white] {ollama_msg}"
     console.print(status_bar)
     console.print("  [#444444]" + "─" * 70 + "[/#444444]\n")
@@ -129,7 +129,7 @@ def _show_status(orchestrator: Orchestrator) -> None:
     """Displays a comprehensive diagnostic dashboard in the terminal."""
     ollama_ok, ollama_msg = _get_ollama_status()
     os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
-    
+
     # Check Jobs DB stats
     total_jobs, completed_jobs, failed_jobs = 0, 0, 0
     if os.path.exists(_JOBS_DB_PATH):
@@ -390,9 +390,9 @@ async def async_main(args: argparse.Namespace) -> None:
     console.clear()
 
     draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
-    
+
     shutdown_event = asyncio.Event()
-    
+
     def signal_handler():
         console.print("\n  [#888888]Shutdown signal received...[/#888888]")
         shutdown_event.set()
@@ -410,18 +410,18 @@ async def async_main(args: argparse.Namespace) -> None:
                         Prompt.ask, "\n[bold cyan]agent[/bold cyan] [dim]❯[/dim]"
                     )
                 ).strip()
-    
+
                 if not user_text:
                     continue
-                
+
                 # Natural Language Model Swap: "use llama3 for/to check the weather"
                 nlp_model_match = re.match(r'^(?:use|change(?: model)? to)\s+(?:this\s+)?(?:model\s+)?([a-zA-Z0-9\.\-:]+)(?:\s+(?:for|to)\s+(.+))?$', user_text, re.IGNORECASE)
                 if nlp_model_match:
                     new_model = nlp_model_match.group(1)
                     extracted_task = nlp_model_match.group(2).strip() if nlp_model_match.group(2) else ""
-                    
+
                     console.clear()
-                    
+
                     if extracted_task.lower() in ["manager and worker", "manager", "worker", "vision", "critic", "all"]:
                         if "manager" in extracted_task.lower() or "all" in extracted_task.lower():
                             orchestrator.router.model_name = new_model
@@ -447,10 +447,10 @@ async def async_main(args: argparse.Namespace) -> None:
                         orchestrator.worker.model_name = new_model
                         config.worker_model = new_model
                         config.save()
-                        
+
                         draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
                         console.print(f"\n  [#00ff00]✓[/#00ff00] [#888888]Auto-switched models to:[/#888888] [bold cyan]{new_model}[/bold cyan]")
-                        
+
                         if extracted_task:
                             user_text = extracted_task
                             console.print(f"  [#888888]Proceeding with task:[/#888888] {user_text}\n")
@@ -462,7 +462,7 @@ async def async_main(args: argparse.Namespace) -> None:
                     if hasattr(orchestrator.step_runner, "executor"):
                         await orchestrator.step_runner.executor.shutdown()
                     break
-    
+
                 if user_text.lower() == '/help':
                     help_table = Table(title="⚡ Available Commands & Shortcuts", box=box.ROUNDED, border_style="blue", padding=(0, 2))
                     help_table.add_column("Command", style="bold yellow", width=14)
@@ -482,7 +482,7 @@ async def async_main(args: argparse.Namespace) -> None:
                     console.print(help_table)
                     console.print()
                     continue
-    
+
                 if user_text.lower() == '/status':
                     _show_status(orchestrator)
                     continue
@@ -503,11 +503,11 @@ async def async_main(args: argparse.Namespace) -> None:
                     console.clear()
                     draw_splash_screen(orchestrator.router.model_name, orchestrator.planner.model_name, config.vision_model)
                     continue
-     
+
                 if user_text.lower() == '/save':
                     console.print("  [#00ff00]✓[/#00ff00] [#888888]Session state saved.[/#888888]")
                     continue
-     
+
                 if user_text.lower() == '/cost':
                     _show_cost(orchestrator)
                     continue
@@ -515,26 +515,26 @@ async def async_main(args: argparse.Namespace) -> None:
                 if user_text.lower().startswith('/consent'):
                     _handle_consent(orchestrator, user_text)
                     continue
-     
+
                 if user_text.lower().startswith('/model'):
                     parts = user_text.split()
                     _handle_model_command(orchestrator, parts)
                     continue
-    
+
                 if user_text.lower() == '/voice':
                     voice_input = VoiceInput()
                     user_text = await asyncio.to_thread(voice_input.listen)
                     if not user_text:
                         continue
                     console.print(f"  [bold white]You said:[/bold white] {user_text}")
-    
+
                 await orchestrator.process_prompt(user_text)
-    
+
             except (KeyboardInterrupt, EOFError):
                 shutdown_event.set()
             except Exception as e:
                 logger.error("System Error: %s", e)
-    
+
     try:
         input_task = asyncio.create_task(input_loop())
         await asyncio.wait([input_task, asyncio.create_task(shutdown_event.wait())], return_when=asyncio.FIRST_COMPLETED)
@@ -544,7 +544,7 @@ async def async_main(args: argparse.Namespace) -> None:
             await orchestrator.shutdown()
         elif hasattr(orchestrator.step_runner, "executor"):
             await orchestrator.step_runner.executor.shutdown()
-            
+
 def main() -> None:
     """Synchronous entry point."""
     import sys  # pylint: disable=import-outside-toplevel
@@ -553,7 +553,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Local Multi-Agent Automation Framework (Terminal Edition)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
-    
+
     if args.debug:
         import os
         os.environ["DEBUG"] = "True"

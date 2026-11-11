@@ -1,8 +1,9 @@
 """
 Pydantic v2 schemas for strict boundary validation.
 """
-from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator, model_validator
+
 
 class ActionStepPayload(BaseModel):
     """
@@ -12,8 +13,8 @@ class ActionStepPayload(BaseModel):
     target: str = Field(...)
     method: str = Field(..., pattern="^(cli|gui|browser|system)$")
     expected_outcome: str = ""
-    undo_action: Optional[str] = None
-    undo_target: Optional[str] = None
+    undo_action: str | None = None
+    undo_target: str | None = None
 
     @field_validator("target")
     @classmethod
@@ -24,7 +25,7 @@ class ActionStepPayload(BaseModel):
         if method == "cli" and not v.strip():
             raise ValueError("CLI target cannot be empty")
         return v
-    
+
     @model_validator(mode='after')
     def validate_undo(self) -> 'ActionStepPayload':
         if bool(self.undo_action) != bool(self.undo_target):

@@ -3,21 +3,27 @@ Orchestrator module for the Local Multi-Agent Automation Framework.
 Handles routing and delegates execution to the PlanExecutionEngine.
 """
 from collections import deque
-from typing import Optional
 
-from rich.panel import Panel
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
 
-from core.logger import setup_logger, console
-from core.protocols import TaskPlanner, TaskCritic, TaskWorker, IntentRouter, MemoryStore, StepRunnerProtocol
 from core.agent_loader import AgentLoader
+from core.custom_agent_runner import CustomAgentRunner
+from core.logger import console, setup_logger
+from core.plan_execution_engine import PlanExecutionEngine
+from core.policies import ExecutionPolicy, PolicyResolution
+from core.protocols import (
+    IntentRouter,
+    MemoryStore,
+    StepRunnerProtocol,
+    TaskCritic,
+    TaskPlanner,
+    TaskWorker,
+)
+from core.sanitizer import InputSanitizer, PromptInjectionError
 from memory.preferences import UserPreferences
 from memory.skill_library import SkillLibrary
-from core.plan_execution_engine import PlanExecutionEngine
-from core.custom_agent_runner import CustomAgentRunner
-from core.sanitizer import InputSanitizer, PromptInjectionError
-from core.policies import ExecutionPolicy, PolicyResolution
 
 logger = setup_logger("Orchestrator")
 
@@ -35,9 +41,9 @@ class Orchestrator:
             worker: TaskWorker,
             step_runner: StepRunnerProtocol,
             memory: MemoryStore,
-            preferences: Optional[UserPreferences] = None,
-            skill_library: Optional[SkillLibrary] = None,
-            agent_loader: Optional[AgentLoader] = None,
+            preferences: UserPreferences | None = None,
+            skill_library: SkillLibrary | None = None,
+            agent_loader: AgentLoader | None = None,
             event_bus=None
             ) -> None:
         self.router = router
@@ -96,21 +102,21 @@ class Orchestrator:
                         await agent.llm.close()
                     except Exception as e:
                         logger.warning("Failed to close LLM client: %s", e)
-        
+
         # Close step runner executor
         if hasattr(self.step_runner, 'executor') and hasattr(self.step_runner.executor, 'shutdown'):
             try:
                 await self.step_runner.executor.shutdown()
             except Exception as e:
                 logger.warning("Failed to close executor: %s", e)
-        
+
         # Close memory store
         if hasattr(self.memory, 'close'):
             try:
                 await self.memory.close()
             except Exception as e:
                 logger.warning("Failed to close memory: %s", e)
-        
+
         logger.info("Orchestrator shutdown complete")
 
     async def process_prompt(self, user_text: str, job_id: str = "") -> bool:
@@ -118,18 +124,19 @@ class Orchestrator:
         if not getattr(self, "_prefs_loaded", False):
             await self.preferences.load()
             self._prefs_loaded = True
-            
+
         try:
             user_text = self.sanitizer.sanitize(user_text)
         except PromptInjectionError as e:
             logger.error("Prompt injection rejected: %s", e)
             return False
-            
+
         logger.info("[bold cyan]Orchestrator received prompt:[/bold cyan] %s", user_text)
-             
+
         import uuid
+
         from core.logger import set_task_id
-        
+
         task_id = str(uuid.uuid4())[:8]
         set_task_id(task_id)
         logger.info("[task:%s] Processing user input: '%s'", task_id, user_text)
@@ -145,11 +152,11 @@ class Orchestrator:
         if resolution == PolicyResolution.CACHED_PLAN:
             logger.info("[bold green]Found successful plan in memory! Bypassing planner...[/bold green]")
             return await self.engine.execute_cached_plan(user_text, payload, list(self._conversation_history), job_id=job_id)
-            
+
         elif resolution == PolicyResolution.SKILL_PLAN:
             logger.info("[bold green]Found matching skill in library! Bypassing planner...[/bold green]")
             return await self.engine.execute_cached_plan(user_text, payload, list(self._conversation_history), job_id=job_id)
-            
+
         elif resolution == PolicyResolution.QUESTION:
             answer = ""
             with Live(Panel("...", title="Agent Answer", border_style="blue"), refresh_per_second=10) as live:
@@ -158,14 +165,14 @@ class Orchestrator:
                     live.update(Panel(Markdown(answer), title="Agent Answer", border_style="blue"))
             self._conversation_history.append({"prompt": user_text, "outcome": "Answered as a standard question."})
             return True
-            
+
         elif resolution == PolicyResolution.VISUAL_QUESTION:
             logger.info("Delegating visual question to Vision Verifier...")
             answer = await self.step_runner.verifier.ask(user_text)
             console.print(Panel(answer, title="Vision Agent Answer", border_style="green"))
             self._conversation_history.append({"prompt": user_text, "outcome": "Answered as a visual question."})
             return True
-            
+
         elif resolution == PolicyResolution.CUSTOM_AGENT:
             matched_agent = payload
             logger.info("[bold magenta]Delegating to custom agent: '%s'[/bold magenta]", matched_agent.name)
@@ -177,9 +184,9 @@ class Orchestrator:
                 self._conversation_history.append({"prompt": user_text, "outcome": f"Failed (agent: {matched_agent.name})."})
                 logger.info("Falling back to default planning pipeline...")
                 return await self.engine.plan_and_execute(user_text, list(self._conversation_history), job_id=job_id)
-                
+
         elif resolution == PolicyResolution.FULL_PLAN:
             logger.info("[bold cyan]Identified as a TASK. Planning execution...[/bold cyan]")
             return await self.engine.plan_and_execute(user_text, list(self._conversation_history), job_id=job_id)
-        
+
         return False

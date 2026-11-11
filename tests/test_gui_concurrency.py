@@ -2,11 +2,12 @@ import asyncio
 import sys
 import time
 from unittest.mock import MagicMock, patch
+
 import pytest
 
-from core.executor.gui_executor import GUIExecutor
-from core.executor.cli_executor import CLIExecutor
 from core.executor.browser_executor import BrowserExecutor
+from core.executor.cli_executor import CLIExecutor
+from core.executor.gui_executor import GUIExecutor
 
 
 class TestGUIConcurrency:
@@ -15,7 +16,7 @@ class TestGUIConcurrency:
         """Verify concurrent GUIExecutor calls are serialized via GUI_LOCK."""
         mock_pyautogui = MagicMock()
         mock_pyautogui.FAILSAFE = True
-        
+
         active_count = 0
         max_active = 0
         execution_order = []

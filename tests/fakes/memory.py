@@ -1,4 +1,4 @@
-from typing import Optional
+
 
 class InMemoryStore:
     """
@@ -11,7 +11,7 @@ class InMemoryStore:
         self._failures: list[dict] = []
         self._episodes: list[dict] = []
 
-    def get_plan(self, task_description: str) -> Optional[str]:
+    def get_plan(self, task_description: str) -> str | None:
         return self._plans.get(task_description)
 
     def save_plan(self, task_description: str, plan_json: str) -> None:

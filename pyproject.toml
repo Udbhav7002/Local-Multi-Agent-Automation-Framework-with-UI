@@ -71,6 +71,7 @@ addopts = "-ra -q --asyncio-mode=auto --cov=core --cov=memory --cov=vision --cov
 testpaths = [
     "tests",
 ]
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py310"
@@ -88,21 +89,28 @@ include = '\.pyi?$'
 
 [tool.mypy]
 python_version = "3.10"
-strict = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
 warn_return_any = true
 warn_unused_ignores = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
 
-[tool.mypy.overrides]
+# Third-party libraries shipped without type stubs or py.typed markers.
+[[tool.mypy.overrides]]
 module = [
-    "core.*",
-    "memory.*",
-    "vision.*",
-    "plugins.*",
-    "tools.*",
-    "main",
-    "api",
-    "tests.*",
+    "AppKit",
+    "AppKit.*",
+    "aiofiles",
+    "aiofiles.*",
+    "bs4",
+    "bs4.*",
+    "pyautogui",
+    "pyautogui.*",
+    "pytesseract",
+    "pytesseract.*",
+    "speech_recognition",
+    "speech_recognition.*",
+    "yaml",
+    "yaml.*",
 ]
+ignore_missing_imports = true

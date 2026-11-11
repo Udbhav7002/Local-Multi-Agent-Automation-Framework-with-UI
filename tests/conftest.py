@@ -1,14 +1,14 @@
 import pytest
-from core.models import ActionStep, MethodType
+
 
 class FakeLLMClient:
     """A fake LLM client for testing without network calls."""
-    def __init__(self, responses: list[str] = None):
+    def __init__(self, responses: list[str] | None = None):
         self.responses = responses or []
         self.call_count = 0
         self.last_prompt = ""
 
-    async def chat(self, model: str, messages: list[dict], format: str = None) -> str:
+    async def chat(self, model: str, messages: list[dict], format: str | None = None) -> str:
         self.call_count += 1
         self.last_prompt = str(messages)
         if self.responses:

@@ -1,10 +1,9 @@
 """
 AgentLoader — loads custom agent definitions from YAML files.
 """
-import os
 import glob
+import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 from core.logger import setup_logger
 
@@ -56,7 +55,7 @@ class AgentLoader:
 
         for filepath in sorted(glob.glob(os.path.join(self.agents_dir, "*.yaml"))):
             try:
-                with open(filepath, "r", encoding="utf-8") as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
 
                 if not isinstance(data, dict):
@@ -82,7 +81,7 @@ class AgentLoader:
             except Exception as e:
                 logger.warning("Failed to load agent from %s: %s", filepath, e)
 
-    def match(self, user_text: str) -> Optional[CustomAgent]:
+    def match(self, user_text: str) -> CustomAgent | None:
         """Find the first custom agent whose triggers match the user's text."""
         for agent in self.agents.values():
             if agent.matches(user_text):

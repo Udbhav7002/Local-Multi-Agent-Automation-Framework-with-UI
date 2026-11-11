@@ -1,15 +1,19 @@
 """
 Circuit breaker pattern for LLM and external service resilience.
 """
-import time
 import asyncio
-from enum import Enum, auto
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from enum import Enum, auto
+from typing import TypeVar
 
+from core.exceptions import AgentFrameworkError
 from core.logger import setup_logger
 
 logger = setup_logger("CircuitBreaker")
+
+T = TypeVar("T")
 
 
 class CircuitState(Enum):
@@ -28,10 +32,10 @@ class CircuitBreaker:
     failure_threshold: int = 5
     recovery_timeout: float = 30.0
     half_open_max_calls: int = 2
-    
+
     _state: CircuitState = field(default=CircuitState.CLOSED, repr=False)
     _failures: int = field(default=0, repr=False)
-    _last_failure_time: Optional[float] = field(default=None, repr=False)
+    _last_failure_time: float | None = field(default=None, repr=False)
     _half_open_calls: int = field(default=0, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -39,7 +43,7 @@ class CircuitBreaker:
     def state(self) -> CircuitState:
         return self._state
 
-    async def call(self, coro_factory: Callable[[], asyncio.Coroutine]):
+    async def call(self, coro_factory: Callable[[], Awaitable[T]]) -> T:
         """
         Execute coro_factory() under circuit breaker protection.
         coro_factory must be a callable that returns a coroutine (not the coroutine itself),
@@ -58,7 +62,7 @@ class CircuitBreaker:
                         f"Circuit breaker '{self.name}' is OPEN. "
                         f"Retry after {self.recovery_timeout}s."
                     )
-            
+
             if self._state == CircuitState.HALF_OPEN:
                 if self._half_open_calls >= self.half_open_max_calls:
                     raise CircuitBreakerOpenError(
@@ -71,7 +75,7 @@ class CircuitBreaker:
             result = await coro_factory()
             await self._on_success()
             return result
-        except Exception as e:
+        except Exception:
             await self._on_failure()
             raise
 
@@ -88,17 +92,13 @@ class CircuitBreaker:
         async with self._lock:
             self._failures += 1
             self._last_failure_time = time.time()
-            
-            if self._failures >= self.failure_threshold:
-                if self._state != CircuitState.OPEN:
-                    logger.error(
-                        "[CircuitBreaker:%s] Threshold reached (%s/%s). Transition -> OPEN",
-                        self.name, self._failures, self.failure_threshold
-                    )
-                    self._state = CircuitState.OPEN
 
-
-from core.exceptions import AgentFrameworkError
+            if self._failures >= self.failure_threshold and self._state != CircuitState.OPEN:
+                logger.error(
+                    "[CircuitBreaker:%s] Threshold reached (%s/%s). Transition -> OPEN",
+                    self.name, self._failures, self.failure_threshold
+                )
+                self._state = CircuitState.OPEN
 
 
 class CircuitBreakerOpenError(AgentFrameworkError):

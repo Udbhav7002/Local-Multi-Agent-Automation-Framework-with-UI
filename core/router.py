@@ -3,12 +3,11 @@ Router module for evaluating the intent of a user prompt.
 Determines whether the user is asking a question or issuing a task command.
 """
 import json
-from typing import Optional, Tuple, Any, AsyncGenerator
+from typing import Any
 
-from core.logger import setup_logger
-from core.config import config
-from core.prompt_loader import PromptLoader
 from core.base_agent import BaseAgent
+from core.logger import setup_logger
+from core.prompt_loader import PromptLoader
 from core.protocols import IntentRouter
 
 logger = setup_logger("Router")
@@ -18,14 +17,14 @@ class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
     """
     Agent that routes user requests to either the QA LLM or the Planner.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[Any] = None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Any | None = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 
-    async def __call__(self, user_text: str) -> Tuple[str, Optional[str]]:
+    async def __call__(self, user_text: str) -> tuple[str, str | None]:
         return await self.classify(user_text)
 
-    async def classify(self, user_text: str) -> Tuple[str, Optional[Any]]:
+    async def classify(self, user_text: str) -> tuple[str, Any | None]:
         """
         Classifies user text as either 'question' or 'task' using structured JSON.
         Returns a tuple: (intent, answer_if_question)
@@ -67,15 +66,15 @@ class Router(BaseAgent, IntentRouter):  # pylint: disable=too-few-public-methods
             # If the model explicitly says task, we treat it as a task.
             if "task" in intent:
                 return "task", None
-                
+
             if "visual_question" in intent:
                 return "visual_question", None
 
             # Otherwise, default to question/chat behavior
             logger.debug("Intent classified as standard question. Generating answer...")
-            
+
             chat_system_prompt = self._load_prompt("router", key="chat_prompt")
-            
+
             answer_stream = self.llm.stream_chat(
                 model=self.model_name,
                 messages=[

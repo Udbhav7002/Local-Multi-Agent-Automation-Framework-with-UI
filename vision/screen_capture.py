@@ -6,6 +6,7 @@ Refactored to:
 - Use context manager per capture (resilient to display config changes)
 - Support timestamped filenames for debugging vision trails
 """
+import contextlib
 import os
 import time
 
@@ -64,7 +65,7 @@ class ScreenCapture:  # pylint: disable=too-few-public-methods
                 logger.debug(
                     "Captured screenshot to %s", output_path
                 )
-                
+
                 self.cleanup()
                 return latest_path
 
@@ -83,7 +84,7 @@ class ScreenCapture:  # pylint: disable=too-few-public-methods
             with mss.mss() as sct:
                 # The bounding box of the monitor
                 monitor = sct.monitors[1]
-                
+
                 # Define the region to capture, offset by the monitor's top/left
                 region = {
                     "top": monitor["top"] + y,
@@ -91,7 +92,7 @@ class ScreenCapture:  # pylint: disable=too-few-public-methods
                     "width": width,
                     "height": height
                 }
-                
+
                 output = sct.grab(region)
 
                 base, ext = os.path.splitext(output_filename)
@@ -105,7 +106,7 @@ class ScreenCapture:  # pylint: disable=too-few-public-methods
                 mss.tools.to_png(output.rgb, output.size, output=latest_path)
 
                 logger.debug("Captured region to %s", output_path)
-                
+
                 self.cleanup()
                 return latest_path
 
@@ -123,22 +124,20 @@ class ScreenCapture:  # pylint: disable=too-few-public-methods
             for filename in os.listdir(self._save_dir):
                 if filename.endswith(".png") and "screenshot" not in filename and "region" not in filename:
                     pass # We only want to sort the timestamped ones
-                
+
                 # Gather all timestamped files
                 if filename.endswith(".png") and ("_" in filename):
                     filepath = os.path.join(self._save_dir, filename)
                     if os.path.isfile(filepath):
                         files.append((filepath, os.path.getmtime(filepath)))
-            
+
             # Sort by modification time, newest first
             files.sort(key=lambda x: x[1], reverse=True)
-            
+
             # Delete older files
             if len(files) > max_files:
                 for file_path, _ in files[max_files:]:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(file_path)
-                    except OSError:
-                        pass
         except Exception as e:
             logger.debug("Failed to cleanup old screenshots: %s", e)

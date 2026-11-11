@@ -2,9 +2,9 @@
 Type-safe data models for the Multi-Agent Automation Framework.
 Replaces raw dict/string passing with validated dataclasses and enums.
 """
-from dataclasses import dataclass, field
+import contextlib
+from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union, Any
 
 
 class ActionType(str, Enum):
@@ -53,12 +53,12 @@ class ActionStep:
     Replaces raw Dict[str, Any] passing throughout the pipeline.
     Supports arbitrary strings for action/method to allow for custom plugins.
     """
-    action: Union[ActionType, str]
+    action: ActionType | str
     target: str
-    method: Union[MethodType, str]
+    method: MethodType | str
     expected_outcome: str = ""
-    undo_action: Optional[ActionType] = None
-    undo_target: Optional[str] = None
+    undo_action: ActionType | None = None
+    undo_target: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict) -> "ActionStep":
@@ -66,8 +66,9 @@ class ActionStep:
         Construct an ActionStep from a raw dict (as parsed from Worker JSON).
         Performs strict Pydantic validation and auto-corrects the method field based on the action.
         """
-        from core.schemas import ActionStepPayload
         from pydantic import ValidationError
+
+        from core.schemas import ActionStepPayload
 
         raw_action = str(raw.get("action", "unknown")).lower().strip()
         raw_target = str(raw.get("target", ""))
@@ -77,14 +78,14 @@ class ActionStep:
         if raw_action == "browser" and raw_target.startswith("goto "):
             raw_action = "goto"
             raw_target = raw_target.replace("goto ", "", 1).strip()
-            
+
         # Ensure we have a valid method fallback before Pydantic validation
         try:
             action_enum = ActionType(raw_action)
             raw_method = ACTION_TO_METHOD.get(action_enum, MethodType.CLI).value
         except ValueError:
             pass
-            
+
         raw["action"] = raw_action
         raw["target"] = raw_target
         raw["method"] = raw_method
@@ -95,13 +96,13 @@ class ActionStep:
             from core.logger import setup_logger
             logger = setup_logger("ActionStep")
             logger.error("Pydantic validation failed for ActionStep: %s", e)
-            raise ValueError(f"Invalid step format: {e}")
+            raise ValueError(f"Invalid step format: {e}") from e
 
         # Parse action, supporting custom plugin actions
         try:
             action_enum = ActionType(payload.action)
-            action: Union[ActionType, str] = action_enum
-            method: Union[MethodType, str] = MethodType(payload.method)
+            action: ActionType | str = action_enum
+            method: MethodType | str = MethodType(payload.method)
         except ValueError:
             # Custom plugin action
             action = payload.action
@@ -109,10 +110,8 @@ class ActionStep:
 
         undo_action = None
         if payload.undo_action:
-            try:
+            with contextlib.suppress(ValueError):
                 undo_action = ActionType(payload.undo_action.lower().strip())
-            except ValueError:
-                pass
 
         return cls(
             action=action,
@@ -142,4 +141,4 @@ class StepResult:
     """The outcome of executing a single ActionStep."""
     success: bool
     output: str
-    step: Optional[ActionStep] = None
+    step: ActionStep | None = None

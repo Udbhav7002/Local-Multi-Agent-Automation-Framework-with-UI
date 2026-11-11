@@ -4,19 +4,17 @@ Extracts the step execution, retry, and vision verification loop
 from the Orchestrator into a focused, testable class.
 """
 import asyncio
-import json
-import time
 import platform
+import time
 from collections import deque
-from typing import Tuple
 
 from core.config import config
+from core.events import EventBus, StepExecutedEvent
+from core.exceptions import LLMTimeoutError, PlanParsingError, SafetyBlockedError
 from core.logger import setup_logger
 from core.models import ActionStep
 from core.response_parser import ResponseParser
 from core.safety_gate import SafetyGate
-from core.events import StepExecutedEvent, EventBus
-from core.exceptions import LLMTimeoutError, PlanParsingError, SafetyBlockedError
 
 logger = setup_logger("StepRunner")
 
@@ -42,7 +40,7 @@ class StepRunner:
     """
     Executes a list of high-level sub-tasks by delegating to the Worker
     and Executor, with retry logic, vision verification, and safety gates.
-    
+
     TODO: Decouple this class to avoid heavy reliance on hasattr/value checks.
     """
 
@@ -72,7 +70,7 @@ class StepRunner:
         self._cancelled = True
         logger.info("[yellow]StepRunner received cancellation signal.[/yellow]")
 
-    async def run(self, steps: list[str]) -> Tuple[bool, str, list[dict]]:
+    async def run(self, steps: list[str]) -> tuple[bool, str, list[dict]]:
         """
         Executes a list of high-level sub-tasks via the Worker Agent.
         Returns (success: bool, failure_feedback: str, steps_executed: list[dict]).
@@ -118,7 +116,7 @@ class StepRunner:
                 step_success, feedback, duration_ms = await self._execute_single_step(
                     step, i, j, action_history
                 )
-                
+
                 steps_executed.append({
                     "action": self._enum_val(step.action),
                     "target": step.target,
@@ -139,7 +137,7 @@ class StepRunner:
         task_idx: int,
         step_idx: int,
         action_history: deque,
-    ) -> Tuple[bool, str, int]:
+    ) -> tuple[bool, str, int]:
         """
         Executes a single ActionStep with retries and vision verification.
         Returns (success: bool, failure_feedback: str, duration_ms: int).
@@ -232,7 +230,7 @@ class StepRunner:
         attempt: int,
         output: str,
         duration_ms: int,
-    ) -> Tuple[bool, str, int] | None:
+    ) -> tuple[bool, str, int] | None:
         """
         Handle successful step execution including vision verification.
         Returns tuple if complete, None if should retry.
@@ -263,11 +261,11 @@ class StepRunner:
         step_idx: int,
         output: str,
         duration_ms: int,
-    ) -> Tuple[bool, str, int]:
+    ) -> tuple[bool, str, int]:
         """Finalize a successful step: record undo, publish event, return result."""
         if step.undo_action and step.undo_target:
             self.undo_stack.append(step)
-        
+
         self._publish_step_event(step, task_idx, step_idx, True, f"Step succeeded: {output}")
         return True, "", duration_ms
 
@@ -280,7 +278,7 @@ class StepRunner:
         output: str,
         duration_ms: int,
         action_history: deque,
-    ) -> Tuple[bool, str, int] | None:
+    ) -> tuple[bool, str, int] | None:
         """
         Handle failed step execution: gather state, attempt correction, or return feedback.
         Returns tuple if complete, None if should retry.
@@ -289,7 +287,7 @@ class StepRunner:
             "[red]Worker Step %s.%s failed:[/red] %s",
             task_idx + 1, step_idx + 1, output
         )
-        
+
         self._publish_step_event(step, task_idx, step_idx, False, f"Step failed: {output}")
 
         active_app = await self._get_active_app()
@@ -334,7 +332,7 @@ class StepRunner:
                 )
             else:
                 proc = None
-                
+
             if proc:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
                 if proc.returncode == 0:
@@ -345,7 +343,7 @@ class StepRunner:
             logger.debug("Failed to get active app due to OS error: %s", e)
         except Exception as e:
             logger.debug("Failed to get active app: %s", e)
-        
+
         return active_app
 
     async def _get_visible_text(self) -> str:
@@ -396,7 +394,7 @@ class StepRunner:
             logger.error("Correction failed due to OS error: %s", e)
         except Exception as e:
             logger.error("Correction failed, falling back to original step: %s", e)
-        
+
         return False
 
     def _build_failure_feedback(
@@ -442,7 +440,7 @@ class StepRunner:
         task_idx: int,
         step_idx: int,
         attempt: int,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Runs vision verification for a completed step.
         Returns (success: bool, failure_feedback: str).
@@ -458,7 +456,7 @@ class StepRunner:
         v_success, v_msg = await self.verifier.verify(
             expected_outcome=step.expected_outcome,
             target_text=step.target,
-            action=action_val  # type: ignore[attr-defined]
+            action=action_val
         )
 
         if v_success:
@@ -502,11 +500,11 @@ class StepRunner:
             step = self.undo_stack.pop()
             if not step.undo_action or not step.undo_target:
                 continue
-            
+
             action_val = self._enum_val(step.action)
             undo_action_val = self._enum_val(step.undo_action)
             logger.info("Reversing action: %s %s -> %s %s", action_val, step.target, undo_action_val, step.undo_target)
-            
+
             # Safety check for the undo action
             if not self.safety_gate.is_safe_action(
                 action=self._enum_val(step.undo_action),
@@ -515,7 +513,7 @@ class StepRunner:
             ):
                 logger.warning("Rollback action blocked by safety gate: %s %s", undo_action_val, step.undo_target)
                 continue
-            
+
             # Create a reverse step
             reverse_step = ActionStep(
                 action=step.undo_action,
@@ -523,7 +521,7 @@ class StepRunner:
                 method=step.method, # Assume same method, e.g. cli -> cli
                 expected_outcome="none"
             )
-            
+
             try:
                 await self.executor.execute_step(reverse_step.to_dict())
             except Exception as e:

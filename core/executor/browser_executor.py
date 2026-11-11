@@ -2,12 +2,19 @@
 Browser execution strategy — Playwright-based DOM automation with persistent context.
 """
 # pylint: disable=broad-exception-caught
+import asyncio
 import os
-from typing import Any, Optional, Tuple
+from pathlib import Path
+from typing import Any
 
 from core.logger import setup_logger
 
 logger = setup_logger("BrowserExecutor")
+
+# __file__ is core/executor/browser_executor.py, so 3 levels up
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 
 
 class BrowserExecutor:
@@ -33,14 +40,14 @@ class BrowserExecutor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_browser_path(browser_name: str) -> Optional[str]:
+    def _get_browser_path(browser_name: str) -> str | None:
         """Dynamically finds the browser executable path across OSes."""
-        import sys
-        import shutil
         import os
-        
+        import shutil
+        import sys
+
         b_name = browser_name.lower()
-        
+
         # Windows
         if sys.platform == 'win32':
             if b_name == 'brave':
@@ -49,7 +56,7 @@ class BrowserExecutor:
             elif b_name == 'chrome':
                 path = os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe")
                 return path if os.path.exists(path) else None
-                
+
         # macOS
         elif sys.platform == 'darwin':
             if b_name == 'brave':
@@ -58,14 +65,14 @@ class BrowserExecutor:
             elif b_name == 'chrome':
                 path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
                 return path if os.path.exists(path) else None
-                
+
         # Linux
         elif sys.platform.startswith('linux'):
             if b_name == 'brave':
                 return shutil.which('brave-browser') or shutil.which('brave')
             elif b_name == 'chrome':
                 return shutil.which('google-chrome') or shutil.which('chrome')
-                
+
         return None
 
     async def _init_browser(self) -> None:
@@ -76,16 +83,11 @@ class BrowserExecutor:
 
                 self._pw = await async_playwright().start()
 
-                # __file__ is core/executor/browser_executor.py, so 3 levels up
-                _project_root = os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                )
-                profile_dir = os.path.join(_project_root, "browser_profile")
-                if not os.path.exists(profile_dir):
-                    os.makedirs(profile_dir)
+                profile_dir = os.path.join(_PROJECT_ROOT, "browser_profile")
+                await asyncio.to_thread(os.makedirs, profile_dir, exist_ok=True)
 
                 brave_path = self._get_browser_path("brave")
-                if brave_path and os.path.exists(brave_path):
+                if brave_path is not None and await asyncio.to_thread(Path(brave_path).exists):
                     logger.info("Launching Brave Browser with Persistent Context...")
                     self._browser = await self._pw.chromium.launch_persistent_context(
                         user_data_dir=profile_dir,
@@ -128,7 +130,7 @@ class BrowserExecutor:
     # Strategy interface
     # ------------------------------------------------------------------
 
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         """Execute a browser action (goto, click_dom, type_dom)."""
         return await self._execute_browser(action, target, retry=True)
 
@@ -138,7 +140,7 @@ class BrowserExecutor:
 
     async def _execute_browser(
         self, action: str, target: str, retry: bool = True
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Executes a browser action directly in the DOM using Playwright."""
         try:
             await self._init_browser()
@@ -178,7 +180,7 @@ class BrowserExecutor:
                 return await self._execute_browser(action, target, retry=False)
             return False, f"Browser execution failed: {err_str}"
 
-    async def _handle_goto(self, target: str) -> Tuple[bool, str]:
+    async def _handle_goto(self, target: str) -> tuple[bool, str]:
         """Navigate to a URL with smart URL detection and DuckDuckGo fallback."""
         import re as _re  # pylint: disable=import-outside-toplevel
 

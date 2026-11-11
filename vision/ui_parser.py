@@ -3,8 +3,6 @@ Vision-based UI Parser for locating elements on screen.
 Uses OpenCV and Tesseract OCR, with a fallback to Windows UIAutomation.
 """
 # pylint: disable=no-member, too-many-locals
-import os
-from typing import Optional, Tuple
 
 import cv2
 import mss
@@ -29,7 +27,7 @@ class UIParser: # pylint: disable=too-few-public-methods
             logger.warning("tesseract executable not found in PATH.")
 
     def find_element(
-            self, element_description: str) -> Optional[Tuple[int, int]]:
+            self, element_description: str | None) -> tuple[int, int] | None:
         """
         Uses OCR as the primary method to find text on screen.
         Falls back to Windows Accessibility Tree if OCR fails.
@@ -48,7 +46,7 @@ class UIParser: # pylint: disable=too-few-public-methods
         return None
 
     def _find_element_ocr(
-            self, element_description: str) -> Optional[Tuple[int, int]]: # pylint: disable=too-many-locals
+            self, element_description: str) -> tuple[int, int] | None: # pylint: disable=too-many-locals
         """
         Captures the screen and uses OpenCV + Tesseract to find bounding boxes of text.
         """
@@ -88,19 +86,14 @@ class UIParser: # pylint: disable=too-few-public-methods
                 # Filter out low confidence or empty text
                 if conf > 30 and text:
                     # Fuzzy match: Exact or substring match
-                    if target_text == text:
-                        best_match_idx = i
-                        break
-                    # Only allow substring matching if the matched part is somewhat significant (e.g., >3 chars)
-                    # to prevent tiny artifacts like "in" from matching "result_link"
-                    elif len(text) >= 4 and (target_text in text or text in target_text):
+                    if target_text == text or len(text) >= 4 and (target_text in text or text in target_text):
                         best_match_idx = i
                         break
                     else:
                         # Fallback: Word overlap matching. Useful if LLM asks for "Google Search results: Gemini AI"
                         # but the screen just says "Gemini - Your AI assistant" or "Gemini AI".
-                        target_words = set([w for w in target_text.split() if len(w) > 3])
-                        screen_words = set([w for w in text.split() if len(w) > 3])
+                        target_words = {w for w in target_text.split() if len(w) > 3}
+                        screen_words = {w for w in text.split() if len(w) > 3}
                         if target_words and screen_words:
                             overlap = len(target_words.intersection(screen_words))
                             if overlap >= 2 or (len(target_words) == 1 and overlap == 1):
@@ -133,7 +126,7 @@ class UIParser: # pylint: disable=too-few-public-methods
             logger.debug("Did you install Tesseract-OCR on your system?")
             return None
 
-    def extract_all_text(self, image_path: Optional[str] = None) -> str:
+    def extract_all_text(self, image_path: str | None = None) -> str:
         """
         Extracts all visible text from the screen or a specific image.
         Uses psm 3 (Fully automatic page segmentation) which is better for

@@ -1,22 +1,21 @@
+import asyncio
 import json
 import time
-import asyncio
 from datetime import datetime
-from typing import Tuple, Optional
 from enum import Enum, auto
 
 from rich.panel import Panel
 
-from core.config import config
-from core.logger import setup_logger, console
-from core.protocols import TaskPlanner, TaskCritic, StepRunnerProtocol, MemoryStore
-from core.events import TaskStartedEvent, TaskCompletedEvent, TaskStateChangedEvent
 from core.agent_loader import AgentLoader
+from core.config import config
+from core.custom_agent_runner import CustomAgentRunner
+from core.events import TaskCompletedEvent, TaskStartedEvent, TaskStateChangedEvent
+from core.logger import console, setup_logger
+from core.planning_context import PlanningContext
+from core.protocols import MemoryStore, StepRunnerProtocol, TaskCritic, TaskPlanner
+from core.skill_loader import AgentSkillLoader
 from memory.preferences import UserPreferences
 from memory.skill_library import SkillLibrary
-from core.planning_context import PlanningContext
-from core.custom_agent_runner import CustomAgentRunner
-from core.skill_loader import AgentSkillLoader
 
 logger = setup_logger("PlanExecutionEngine")
 
@@ -76,10 +75,10 @@ class PlanExecutionEngine:
         critic: TaskCritic,
         step_runner: StepRunnerProtocol,
         memory: MemoryStore,
-        preferences: Optional[UserPreferences] = None,
-        skill_library: Optional[SkillLibrary] = None,
-        agent_loader: Optional[AgentLoader] = None,
-        custom_agent_runner: Optional[CustomAgentRunner] = None,
+        preferences: UserPreferences | None = None,
+        skill_library: SkillLibrary | None = None,
+        agent_loader: AgentLoader | None = None,
+        custom_agent_runner: CustomAgentRunner | None = None,
         event_bus=None
     ) -> None:
         self.planner = planner
@@ -100,7 +99,7 @@ class PlanExecutionEngine:
                 message=f"Starting cached task: {user_text}",
                 job_id=job_id
             ))
-        
+
         task_start_time = time.time()
         try:
             steps = json.loads(plan_json)
@@ -144,7 +143,7 @@ class PlanExecutionEngine:
             logger.error("Error executing cached plan: %s", e)
             return False
 
-    async def execute_step_groups(self, groups: list[list[dict]]) -> Tuple[bool, str, list]:
+    async def execute_step_groups(self, groups: list[list[dict]]) -> tuple[bool, str, list]:
         """Executes groups of steps, supporting delegation and concurrency."""
         plan_success = True
         failure_feedback = ""
@@ -160,8 +159,13 @@ class PlanExecutionEngine:
                 agent_loader = self.agent_loader
                 custom_agent_runner = self.custom_agent_runner
                 step_runner = self.step_runner
-                
-                async def _delegate(step):
+
+                async def _delegate(
+                    step,
+                    agent_loader=agent_loader,
+                    custom_agent_runner=custom_agent_runner,
+                    step_runner=step_runner,
+                ):
                     agent_name = step["delegate_to"]
                     agent = agent_loader.agents.get(agent_name)
                     if agent:
@@ -182,7 +186,7 @@ class PlanExecutionEngine:
                     logger.info("[bold cyan]Executing %d tasks in parallel...[/bold cyan]", len(normal_tasks))
                     results = await asyncio.gather(*(self.step_runner.run([task]) for task in normal_tasks), return_exceptions=True)
                     for result in results:
-                        if isinstance(result, Exception):
+                        if isinstance(result, BaseException):
                             logger.error("Parallel task failed with exception: %s", result)
                             plan_success = False
                             failure_feedback = str(result)
@@ -201,17 +205,17 @@ class PlanExecutionEngine:
     async def plan_and_execute(self, user_text: str, history: list, job_id: str = "") -> bool:
         """The main loop: generate plan, evaluate with critic, and execute using a State Machine."""
         current_state = TaskState.PLANNING
-        
+
         await self._publish_task_started(user_text, job_id)
-        
+
         task_start_time = time.time()
-        
+
         ctx = await self._build_planning_context(user_text, history)
-        
+
         plan_attempt = 0
         plan_json = ""
-        steps = []
-        all_steps_executed = []
+        steps: list = []
+        all_steps_executed: list = []
 
         while current_state not in (TaskState.COMPLETED, TaskState.FAILED):
             if current_state == TaskState.PLANNING:
@@ -227,7 +231,7 @@ class PlanExecutionEngine:
                         current_state = TaskState.FAILED
                         await self._publish_state_change(user_text, job_id, TaskState.FAILED)
                     continue
-                    
+
             elif current_state == TaskState.CRITIQUING:
                 approved = await self._critique_plan(user_text, plan_json)
                 if approved:
@@ -238,10 +242,10 @@ class PlanExecutionEngine:
                     plan_attempt += 1
                     current_state = TaskState.PLANNING
                     await self._publish_state_change(user_text, job_id, TaskState.PLANNING)
-                    
+
             elif current_state == TaskState.EXECUTING:
                 plan_success, failure_feedback, all_steps_executed = await self._execute_plan(steps)
-                
+
                 if plan_success:
                     current_state = TaskState.COMPLETED
                     await self._publish_state_change(user_text, job_id, TaskState.COMPLETED)
@@ -280,25 +284,25 @@ class PlanExecutionEngine:
             llm=self.planner.llm,
             model_name=self.planner.model_name
         )
-        
+
         if self.preferences:
             ctx.user_preferences = self.preferences.get_context_string()
-            
+
         if self.agent_loader:
             ctx.available_agents = self.agent_loader.get_agent_summary()
-            
+
         skill_loader = AgentSkillLoader()
         ctx.agent_skills = skill_loader.get_all_summaries()
-            
+
         ctx.conversation_history = list(history)
         ctx.past_failures = await self.memory.get_failures(user_text)
-        
+
         if ctx.past_failures:
             logger.warning("[yellow]Loaded %s past failure(s) into Planner context.[/yellow]", len(ctx.past_failures))
-            
+
         return ctx
 
-    async def _generate_and_validate_plan(self, ctx: PlanningContext, plan_attempt: int) -> Tuple[str, list]:
+    async def _generate_and_validate_plan(self, ctx: PlanningContext, plan_attempt: int) -> tuple[str, list]:
         if plan_attempt > 0:
             logger.info("[magenta]Requesting new plan (Attempt %s/%s)...[/magenta]", plan_attempt + 1, config.max_plan_regenerations)
         else:
@@ -311,8 +315,8 @@ class PlanExecutionEngine:
                 raise ValueError("Generated plan is not a JSON array of objects with 'task' keys.")
 
             plan_text = _format_htn(steps)
-            console.print(Panel(plan_text.strip(), title=f"Hierarchical Execution Plan", border_style="magenta"))
-            
+            console.print(Panel(plan_text.strip(), title="Hierarchical Execution Plan", border_style="magenta"))
+
             return plan_json, steps
 
         except (json.JSONDecodeError, ValueError) as e:
@@ -321,7 +325,7 @@ class PlanExecutionEngine:
         except Exception as e:
             logger.error("Planner exception: %s", e)
             ctx.add_feedback(f"\n\n[SYSTEM FEEDBACK]: Generation failed: {e}.\nCRITICAL INSTRUCTION: Fix the error and generate a valid plan.")
-        
+
         return "", []
 
     async def _critique_plan(self, user_text: str, plan_json: str) -> bool:
@@ -333,7 +337,7 @@ class PlanExecutionEngine:
             return False
         return True
 
-    async def _execute_plan(self, steps: list) -> Tuple[bool, str, list]:
+    async def _execute_plan(self, steps: list) -> tuple[bool, str, list]:
         flat_steps = _flatten_htn(steps)
         groups = _group_steps_for_parallel(flat_steps)
         return await self.execute_step_groups(groups)
@@ -370,7 +374,7 @@ class PlanExecutionEngine:
     ) -> bool:
         logger.info("[bold green]Task Complete.[/bold green]")
         await self.memory.save_plan(user_text, plan_json)
-        
+
         episode = {
             "task": user_text,
             "plan": steps,
@@ -380,7 +384,7 @@ class PlanExecutionEngine:
             "timestamp": datetime.now().isoformat()
         }
         await self.memory.save_episode(episode)
-        
+
         if self.preferences:
             for s in all_steps_executed:
                 if s.get("action") == "open_app":

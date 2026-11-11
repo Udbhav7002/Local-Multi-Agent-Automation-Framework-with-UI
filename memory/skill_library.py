@@ -1,13 +1,13 @@
 """
 Skill library for caching and reusing successful action sequences.
 """
-import os
-import json
-import re
-import hashlib
 import difflib
+import hashlib
+import json
+import os
+import re
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any
 
 from core.logger import setup_logger
 
@@ -16,17 +16,17 @@ logger = setup_logger("SkillLibrary")
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SKILLS_DIR = os.path.join(_PROJECT_ROOT, "skills")
 
-SkillDict = Dict[str, Any]
+SkillDict = dict[str, Any]
 
 
 class SkillLibrary:
     """Manages reusable skills generated from past successful plans."""
-    
-    def __init__(self, skills_dir: Optional[str] = None) -> None:
+
+    def __init__(self, skills_dir: str | None = None) -> None:
         self.skills_dir = str(skills_dir) if skills_dir is not None else _SKILLS_DIR
         if not os.path.exists(self.skills_dir):
             os.makedirs(self.skills_dir, exist_ok=True)
-        self._cache: Dict[str, SkillDict] = {}
+        self._cache: dict[str, SkillDict] = {}
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -34,14 +34,14 @@ class SkillLibrary:
         self._cache.clear()
         if not os.path.exists(self.skills_dir):
             return
-            
+
         try:
             for fname in os.listdir(self.skills_dir):
                 if not fname.endswith(".json"):
                     continue
                 file_path = os.path.join(self.skills_dir, fname)
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(file_path, encoding="utf-8") as f:
                         skill: SkillDict = json.load(f)
                     skill_id = skill.get("skill_id") or os.path.splitext(fname)[0]
                     self._cache[skill_id] = skill
@@ -49,7 +49,7 @@ class SkillLibrary:
                     logger.error("Error loading skill %s: %s", fname, e)
         except Exception as e:
             logger.error("Error reading skills directory %s: %s", self.skills_dir, e)
-            
+
         logger.debug("Loaded %d skills into memory cache.", len(self._cache))
 
     def _normalize_text(self, text: str) -> str:
@@ -69,7 +69,7 @@ class SkillLibrary:
             return 0.0
         if t1 == t2:
             return 1.0
-            
+
         # Token Jaccard similarity
         tokens1 = set(t1.split())
         tokens2 = set(t2.split())
@@ -79,10 +79,10 @@ class SkillLibrary:
             intersection = tokens1.intersection(tokens2)
             union = tokens1.union(tokens2)
             jaccard = len(intersection) / len(union) if union else 0.0
-            
+
         # difflib sequence matching
         seq_match = difflib.SequenceMatcher(None, t1, t2).ratio()
-        
+
         # Substring boost: only if one text is contained in another AND length ratio >= 0.65
         # This prevents short substrings (e.g. 'open safari') from falsely matching
         # multi-step commands (e.g. 'open safari and search black myth wukong').
@@ -92,7 +92,7 @@ class SkillLibrary:
 
         return max(jaccard, seq_match)
 
-    def _find_matching_skill(self, task_description: str, threshold: float = 0.70) -> Optional[Tuple[str, SkillDict, float]]:
+    def _find_matching_skill(self, task_description: str, threshold: float = 0.70) -> tuple[str, SkillDict, float] | None:
         """
         Searches in-memory cache for a skill matching the task description.
         Returns tuple of (skill_id, skill_dict, similarity_score) if found.
@@ -100,14 +100,14 @@ class SkillLibrary:
         if not task_description or not task_description.strip():
             return None
 
-        best_skill_id: Optional[str] = None
-        best_skill: Optional[SkillDict] = None
+        best_skill_id: str | None = None
+        best_skill: SkillDict | None = None
         best_score = -1.0
-        
+
         task_lower = task_description.lower().strip()
-        
+
         for skill_id, skill in self._cache.items():
-            trigger_phrases: List[str] = skill.get("trigger_phrases", [])  # type: ignore[assignment]
+            trigger_phrases: list[str] = skill.get("trigger_phrases", [])
             skill_score = 0.0
             for trigger in trigger_phrases:
                 trig_lower = trigger.lower().strip()
@@ -117,7 +117,7 @@ class SkillLibrary:
                 score = self._compute_similarity(task_description, trigger)
                 if score > skill_score:
                     skill_score = score
-                    
+
             if skill_score >= threshold and skill_score > best_score:
                 best_score = skill_score
                 best_skill_id = skill_id
@@ -135,14 +135,14 @@ class SkillLibrary:
         text_hash = hashlib.md5(text.lower().encode()).hexdigest()[:8]
         return f"{prefix}_{text_hash}"
 
-    def save_skill(self, task_description: str, plan_json: str) -> None:
+    def save_skill(self, task_description: str | None, plan_json: str) -> None:
         """Saves a successful plan as a reusable skill, deduplicating via semantic matching."""
         if not task_description or not task_description.strip():
             return
 
         # Check for existing semantically similar skill
         match_result = self._find_matching_skill(task_description, threshold=0.70)
-        
+
         if match_result:
             skill_id, skill, score = match_result
             logger.debug("Found existing matching skill '%s' (similarity: %.2f) for deduplication.", skill_id, score)
@@ -159,17 +159,17 @@ class SkillLibrary:
 
         # Update plan in case the new one is updated
         skill["plan_json"] = plan_json
-        
+
         # Add trigger phrase if new
         task_lower = task_description.lower().strip()
-        trigger_phrases: List[str] = skill.get("trigger_phrases", [])  # type: ignore[assignment]
+        trigger_phrases: list[str] = skill.get("trigger_phrases", [])
         if task_lower not in trigger_phrases:
             trigger_phrases.append(task_lower)
         skill["trigger_phrases"] = trigger_phrases
-        
+
         skill["success_count"] = int(skill.get("success_count", 0)) + 1
         skill["last_used"] = datetime.now().isoformat()
-        
+
         # Update in-memory cache
         self._cache[skill_id] = skill
 
@@ -182,7 +182,7 @@ class SkillLibrary:
         except Exception as e:
             logger.error("Failed to save skill '%s': %s", skill_id, e)
 
-    def mark_failure(self, task_description: str) -> None:
+    def mark_failure(self, task_description: str | None) -> None:
         """Mark a skill as failed to deprioritize it over time."""
         if not task_description or not task_description.strip():
             return
@@ -199,7 +199,7 @@ class SkillLibrary:
 
         skill["fail_count"] = int(skill.get("fail_count", 0)) + 1
         self._cache[skill_id] = skill
-        
+
         file_path = os.path.join(self.skills_dir, f"{skill_id}.json")
         try:
             with open(file_path, "w", encoding="utf-8") as f:
@@ -208,7 +208,7 @@ class SkillLibrary:
         except Exception as e:
             logger.error("Failed to mark skill failure: %s", e)
 
-    def get_skill_plan(self, task_description: str) -> Optional[str]:
+    def get_skill_plan(self, task_description: str | None) -> str | None:
         """Look for a matching skill with a high success rate (O(1) disk I/O, using RAM cache)."""
         if not task_description or not task_description.strip() or not self._cache:
             return None
@@ -216,13 +216,13 @@ class SkillLibrary:
         best_match_plan = None
         best_rank_score = -1.0
         best_success_rate = -1.0
-        
+
         task_lower = task_description.lower().strip()
 
-        for skill_id, skill in self._cache.items():
-            trigger_phrases: List[str] = skill.get("trigger_phrases", [])  # type: ignore[assignment]
+        for _skill_id, skill in self._cache.items():
+            trigger_phrases: list[str] = skill.get("trigger_phrases", [])
             match_score = 0.0
-            
+
             for trigger in trigger_phrases:
                 trig_lower = trigger.lower().strip()
                 if trig_lower == task_lower:
@@ -238,7 +238,7 @@ class SkillLibrary:
                 fails = int(skill.get("fail_count", 0))
                 total = successes + fails
                 rate = successes / total if total > 0 else 1.0
-                
+
                 # Only use skills with >= 50% success rate
                 if rate >= 0.5:
                     rank_score = match_score * 0.6 + rate * 0.4
@@ -249,5 +249,5 @@ class SkillLibrary:
 
         if best_match_plan:
             logger.info("Found matching skill with success rate %.0f%%", best_success_rate * 100)
-            
+
         return best_match_plan

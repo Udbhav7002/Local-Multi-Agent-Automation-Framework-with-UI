@@ -3,15 +3,14 @@ CLI execution strategy — runs shell commands via asyncio subprocess.
 """
 # pylint: disable=broad-exception-caught
 import asyncio
+import contextlib
 import os
-import shlex
 import signal
-from typing import Tuple
-
-SHELL_METACHARACTERS = {'|', ';', '&&', '||', '`', '$(', '>', '>>', '<', '<<'}
 
 from core.config import config
 from core.logger import setup_logger
+
+SHELL_METACHARACTERS = {'|', ';', '&&', '||', '`', '$(', '>', '>>', '<', '<<'}
 
 logger = setup_logger("CLIExecutor")
 
@@ -19,15 +18,15 @@ logger = setup_logger("CLIExecutor")
 class CLIExecutor:
     """Executes native shell commands with timeout and output truncation."""
 
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         """Execute a CLI command."""
         return await self._run_command(target)
 
-    async def _run_command(self, command: str) -> Tuple[bool, str]:
+    async def _run_command(self, command: str) -> tuple[bool, str]:
         """Executes a native command via shell on macOS."""
         if not command.strip():
             return False, "Empty command"
-            
+
         try:
             logger.debug("Running CLI command via shell: %s", command)
             # Use start_new_session=True to create a new process group
@@ -44,10 +43,8 @@ class CLIExecutor:
                 )
             except asyncio.TimeoutError:
                 # Kill the entire process group to avoid orphaned child processes
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 await process.wait()
                 logger.error(
                     "CLI command timed out after %s seconds: %s",

@@ -95,7 +95,7 @@ class PlanningContext:
         current_est = len(self.original_task) + len(str(self.past_failures)) + len(str(self.conversation_history))
         for fb in self.system_feedback:
             current_est += len(fb)
-            
+
         if current_est > (self.max_prompt_chars * 0.8) and self.llm and self.model_name:
             await self._summarize()
 
@@ -110,13 +110,13 @@ class PlanningContext:
         """Summarizes history and failures into a dense block."""
         from core.logger import setup_logger
         logger = setup_logger("PlanningContext")
-        
+
         prompt = "Summarize the following past failures and conversation history into dense, concise bullet points highlighting key lessons learned to avoid repeating mistakes. Be extremely brief.\n\n"
         if self.past_failures:
             prompt += "PAST FAILURES:\n" + str(self.past_failures) + "\n\n"
         if self.conversation_history:
             prompt += "CONVERSATION HISTORY:\n" + str(self.conversation_history) + "\n\n"
-        
+
         try:
             logger.info("Context window nearing 80%. Summarizing history...")
             summary = await self.llm.chat(
@@ -129,7 +129,7 @@ class PlanningContext:
         except Exception as e:
             logger.error(f"Context summarization failed: {e}")
 
-    def _fit_to_budget_sync(self, sections: list[str] = None) -> str:
+    def _fit_to_budget_sync(self, sections: list[str] | None = None) -> str:
         """Truncate prompt sections in FIFO order to stay within max_prompt_chars.
 
         Guarantees:

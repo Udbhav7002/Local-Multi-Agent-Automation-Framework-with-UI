@@ -4,7 +4,7 @@ GUI execution strategy — screen-level automation via pyautogui + OCR.
 # pylint: disable=broad-exception-caught
 import asyncio
 import platform
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from core.logger import setup_logger
 
@@ -18,12 +18,12 @@ class GUIExecutor:
     element finding. Synchronized via GUI_LOCK.
     """
 
-    GUI_LOCK: Optional[asyncio.Lock] = None
+    GUI_LOCK: asyncio.Lock | None = None
 
     def __init__(
         self,
-        ui_parser: Optional[Any] = None,
-        lock: Optional[asyncio.Lock] = None,
+        ui_parser: Any | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> None:
         self.ui_parser = ui_parser
         self._lock = lock
@@ -39,7 +39,7 @@ class GUIExecutor:
 
         return GUIExecutor.GUI_LOCK
 
-    async def execute(self, action: str, target: str) -> Tuple[bool, str]:
+    async def execute(self, action: str, target: str) -> tuple[bool, str]:
         """Execute a GUI action under GUI_LOCK."""
         async with self.lock:
             try:

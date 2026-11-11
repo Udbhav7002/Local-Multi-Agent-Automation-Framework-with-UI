@@ -1,16 +1,16 @@
 """
 Planner module for breaking down user tasks into actionable JSON steps.
 """
-from core.config import config
-from core.logger import setup_logger
-from core.response_parser import ResponseParser
-from core.protocols import TaskPlanner
-from core.telemetry import trace_latency
-from core.events import SystemEvent, EventBus
-from core.prompt_loader import PromptLoader
-from core.base_agent import BaseAgent
 import json
-from typing import Optional
+
+from core.base_agent import BaseAgent
+from core.config import config
+from core.events import EventBus, SystemEvent
+from core.logger import setup_logger
+from core.prompt_loader import PromptLoader
+from core.protocols import TaskPlanner
+from core.response_parser import ResponseParser
+from core.telemetry import trace_latency
 
 logger = setup_logger("Planner")
 
@@ -19,7 +19,7 @@ class Planner(BaseAgent, TaskPlanner):
     """
     Agent that generates a sequential plan of actions for the framework to execute.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[EventBus] = None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus | None = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 

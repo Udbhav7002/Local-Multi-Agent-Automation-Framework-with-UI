@@ -8,13 +8,11 @@ importing `ollama` directly. This enables:
   - Unit testing with a FakeLLMClient that returns canned responses.
   - Centralizing keep_alive, num_ctx, and retry logic in one place.
 """
-from typing import Optional, Protocol, runtime_checkable, AsyncGenerator
-import asyncio
+from collections.abc import AsyncGenerator
+from typing import Any, Protocol, runtime_checkable
 
-from core.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
-from core.exceptions import LLMTimeoutError
-from core.llm_retry import execute_with_retry, execute_stream_with_retry
-
+from core.circuit_breaker import CircuitBreaker
+from core.llm_retry import execute_stream_with_retry, execute_with_retry
 from core.logger import setup_logger
 
 logger = setup_logger("LLMClient")
@@ -31,9 +29,9 @@ class LLMClient(Protocol):
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
         """
         Send a chat completion request and return the content string.
@@ -53,9 +51,9 @@ class LLMClient(Protocol):
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Send a chat completion request and stream the response tokens.
@@ -76,7 +74,7 @@ class OllamaClient:
     def __init__(self, num_ctx: int = 8192, keep_alive: int | str = "5m") -> None:
         self._num_ctx = num_ctx
         self._keep_alive = keep_alive
-        
+
         # Instantiate AsyncClient once to reuse the aiohttp ClientSession
         from ollama import AsyncClient
         self._client = AsyncClient()
@@ -97,17 +95,17 @@ class OllamaClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-async def chat(
+    async def chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
         """Send a chat completion via the Ollama Async SDK with retry and timeout."""
         from core.config import config
-        
+
         ollama_options = {"num_ctx": self._num_ctx}
         if options:
             ollama_options.update(options)
@@ -128,7 +126,7 @@ async def chat(
                 response = await self._client.chat(**kwargs)
                 content = response.get("message", {}).get("content", "").strip()
                 return str(content)
-            
+
             return await execute_with_retry(
                 _call,
                 max_retries=3,
@@ -136,16 +134,16 @@ async def chat(
                 operation_name=f"Ollama chat (model={model})",
                 retryable_exceptions=(ConnectionError, OSError),
             )
-             
+
         return await self._breaker.call(_do_chat)
 
-async def stream_chat(
+    async def stream_chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         from core.config import config
         ollama_options = {"num_ctx": self._num_ctx}
@@ -202,27 +200,28 @@ class LiteLLMClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
-async def chat(
+    async def chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
-        from core.config import config
         import litellm
 
+        from core.config import config
+
         # litellm expects messages in OpenAI format, which is the same as Ollama's
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
         }
-        
+
         # If response_format is requested (e.g., json), map it for models that support it
         if format == "json":
             kwargs["response_format"] = {"type": "json_object"}
-        
+
         # Handle images for vision models (litellm supports OpenAI vision format)
         if images:
             # Convert to OpenAI vision format: add image_url to the last user message
@@ -246,10 +245,10 @@ async def chat(
                     api_model = model
 
                 response = await litellm.acompletion(model=api_model, **kwargs)
-                 
+
                 content = response.choices[0].message.content.strip()
                 return str(content)
-            
+
             return await execute_with_retry(
                 _call,
                 max_retries=3,
@@ -257,18 +256,19 @@ async def chat(
                 operation_name=f"LiteLLM chat (model={model})",
                 retryable_exceptions=(Exception,),  # litellm can raise various exceptions
             )
-             
+
         return await self._breaker.call(_do_chat)
 
-async def stream_chat(
+    async def stream_chat(
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         import litellm
+
         from core.config import config
 
         # Handle images for vision models (litellm supports OpenAI vision format)
@@ -295,13 +295,13 @@ async def stream_chat(
         async def _stream_factory():
             # litellm.acompletion with stream=True returns an async generator
             response_gen = litellm.acompletion(**kwargs)
-            
+
             # Get first chunk
             first_chunk = await response_gen.__anext__()
             content = first_chunk.choices[0].delta.content
             if content:
                 yield content
-            
+
             # Yield remaining chunks
             async for chunk in response_gen:
                 content = chunk.choices[0].delta.content
@@ -359,9 +359,9 @@ class MultiLLMClient:
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
         try:
             if self._is_cloud_model(model):
@@ -371,7 +371,7 @@ class MultiLLMClient:
         except Exception as e:
             logger.warning(f"Primary LLM ({model}) failed: {e}. Attempting fallback routing.")
             fallback_model = "gemini/gemini-2.5-flash" if not self._is_cloud_model(model) else "qwen2.5-coder:14b"
-            
+
             if self._is_cloud_model(fallback_model):
                 return await self.litellm.chat(fallback_model, messages, format, images, options)
             else:
@@ -381,9 +381,9 @@ class MultiLLMClient:
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         yielded_any = False
         try:
@@ -402,7 +402,7 @@ class MultiLLMClient:
                 raise
             logger.warning(f"Primary LLM ({model}) failed before first yield: {e}. Attempting fallback routing.")
             fallback_model = "gemini/gemini-2.5-flash" if not self._is_cloud_model(model) else "qwen2.5-coder:14b"
-            
+
             if self._is_cloud_model(fallback_model):
                 async for chunk in self.litellm.stream_chat(fallback_model, messages, format, images, options):
                     yield chunk
@@ -421,7 +421,7 @@ class FakeLLMClient:
         router = Router(llm=fake, model_name="test")
     """
 
-    def __init__(self, responses: Optional[list[str]] = None) -> None:
+    def __init__(self, responses: list[str] | None = None) -> None:
         self._responses = list(responses or [])
         self._call_index = 0
         self.call_log: list[dict] = []
@@ -430,9 +430,9 @@ class FakeLLMClient:
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> str:
         """Return the next canned response, cycling if exhausted."""
         self.call_log.append({
@@ -452,9 +452,9 @@ class FakeLLMClient:
         self,
         model: str,
         messages: list[dict],
-        format: Optional[str] = None,
-        images: Optional[list[str]] = None,
-        options: Optional[dict] = None,
+        format: str | None = None,
+        images: list[str] | None = None,
+        options: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         # Just yield the canned response
         response = await self.chat(model, messages, format, images, options)

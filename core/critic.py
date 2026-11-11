@@ -2,17 +2,17 @@
 Critic module for evaluating proposed execution plans.
 Ensures safety, logic, and adherence to rules before execution.
 """
-import json
 import asyncio
-from typing import Tuple, Optional
-from core.exceptions import LLMTimeoutError
+import json
+
+from core.base_agent import BaseAgent
 from core.circuit_breaker import CircuitBreakerOpenError
-from core.protocols import TaskCritic
-from core.telemetry import trace_latency
-from core.events import SystemEvent, EventBus
+from core.events import EventBus, SystemEvent
+from core.exceptions import LLMTimeoutError
 from core.logger import setup_logger
 from core.prompt_loader import PromptLoader
-from core.base_agent import BaseAgent
+from core.protocols import TaskCritic
+from core.telemetry import trace_latency
 
 logger = setup_logger("Critic")
 
@@ -20,15 +20,15 @@ class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
     """
     Agent that verifies plans before execution for safety, efficiency, and correctness.
     """
-    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: Optional[EventBus] = None) -> None:
+    def __init__(self, llm, model_name: str, prompt_loader: PromptLoader, event_bus: EventBus | None = None) -> None:
         super().__init__(llm, model_name, prompt_loader)
         self.event_bus = event_bus
 
-    async def __call__(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
+    async def __call__(self, user_task: str, plan_json: str) -> tuple[bool, str]:
         return await self.verify_plan(user_task, plan_json)
 
     @trace_latency("Critic.verify_plan")
-    async def verify_plan(self, user_task: str, plan_json: str) -> Tuple[bool, str]:
+    async def verify_plan(self, user_task: str, plan_json: str) -> tuple[bool, str]:
         """
         Evaluates a proposed JSON plan against the user's task.
         Ensures the plan makes logical sense and contains no inherently dangerous steps.
@@ -69,7 +69,7 @@ class Critic(BaseAgent, TaskCritic):  # pylint: disable=too-few-public-methods
                             source="Critic", level="WARNING", message=f"Critic rejected plan: {feedback}"
                         ))
 
-                return is_approved, feedback
+                return bool(is_approved), str(feedback)
             except json.JSONDecodeError:
                 logger.error("Critic output invalid JSON: %s", content)
                 return False, f"Critic failed to output valid JSON: {content}"

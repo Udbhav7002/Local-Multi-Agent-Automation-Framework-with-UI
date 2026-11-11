@@ -6,6 +6,7 @@ and exception handling across pytesseract, cv2, mss, and built-in exceptions.
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 # Skip tests if heavy dependencies are not available
@@ -13,7 +14,7 @@ cv2 = pytest.importorskip("cv2")
 pytesseract = pytest.importorskip("pytesseract")
 np = pytest.importorskip("numpy")
 
-from vision.ui_parser import UIParser
+from vision.ui_parser import UIParser  # noqa: E402  (must follow importorskip guards)
 
 
 class TestUIParserMonitorBounds:

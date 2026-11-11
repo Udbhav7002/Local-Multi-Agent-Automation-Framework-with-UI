@@ -1,7 +1,10 @@
-import pytest
 import json
-from core.step_runner import StepRunner
+
+import pytest
+
 from core.safety_gate import SafetyGate
+from core.step_runner import StepRunner
+
 
 class FakeWorker:
     def __init__(self, mock_response: str):
@@ -24,7 +27,7 @@ async def test_step_runner_success(fake_executor, fake_verifier):
     runner = StepRunner(worker, fake_executor, fake_verifier, SafetyGate())
 
     success, feedback, steps_exec = await runner.run(["do something"])
-    
+
     assert success is True
     assert feedback == ""
     assert len(steps_exec) == 1
@@ -50,6 +53,6 @@ async def test_step_runner_executor_failure(fake_executor, fake_verifier):
     fake_executor.mock_output = "Command not found"
 
     success, feedback, steps_exec = await runner.run(["do something"])
-    
+
     assert success is False
     assert "Command not found" in feedback

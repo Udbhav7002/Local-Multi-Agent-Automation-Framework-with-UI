@@ -1,13 +1,13 @@
 """
 Vision verification module for evaluating screen states using a vision-language model.
 """
+import asyncio
 import json
 import re
-import asyncio
 
-from core.logger import setup_logger
 from core.config import config
 from core.cost_tracker import get_cost_tracker
+from core.logger import setup_logger
 from vision.screen_capture import ScreenCapture
 
 logger = setup_logger("VisionVerifier")
@@ -30,10 +30,10 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
     def _detect_cloud_model(self) -> bool:
         """Detect if the current model routes through cloud provider."""
         if hasattr(self.llm, '_is_cloud_model'):
-            return self.llm._is_cloud_model(self.model_name)
+            return bool(self.llm._is_cloud_model(self.model_name))
         if hasattr(self.llm, 'ollama') and hasattr(self.llm, 'litellm'):
             # MultiLLMClient
-            return self.llm._is_cloud_model(self.model_name)
+            return bool(self.llm._is_cloud_model(self.model_name))
         return False
 
     def _build_vision_message(self, prompt: str, screenshot_path: str) -> dict:
@@ -59,7 +59,7 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
         """Rough token estimation for vision requests."""
         # Rough estimate: ~4 chars per token for text
         text_tokens = len(prompt) // 4
-        # Image tokens: ~85 tokens per tile for GPT-4o (low detail), 
+        # Image tokens: ~85 tokens per tile for GPT-4o (low detail),
         # up to ~170 for high detail. We'll estimate 200 for safety.
         image_tokens = 200 if has_image else 0
         # Output estimate: JSON response ~50 tokens
@@ -105,10 +105,9 @@ class VisionVerifier:  # pylint: disable=too-few-public-methods
             return False, ""
 
         # 1. For 'type' actions, the typed text should be visible on screen
-        if action == "type" and len(target_text) > 2:
-            if target_text.lower() in extracted_text:
-                logger.info("OCR Fast-Path: Found typed text '%s' on screen.", target_text)
-                return True, f"OCR verified typed text: '{target_text}' is visible on screen."
+        if action == "type" and len(target_text) > 2 and target_text.lower() in extracted_text:
+            logger.info("OCR Fast-Path: Found typed text '%s' on screen.", target_text)
+            return True, f"OCR verified typed text: '{target_text}' is visible on screen."
 
         # 2. Look for any quoted strings in the expected outcome
         quotes = re.findall(r"'([^']*)'", expected_outcome) + re.findall(r'"([^"]*)"', expected_outcome)

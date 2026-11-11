@@ -1,5 +1,5 @@
-import pytest
 from core.safety_gate import SafetyGate
+
 
 def test_safety_gate_whitelist():
     gate = SafetyGate()
@@ -7,12 +7,12 @@ def test_safety_gate_whitelist():
     assert gate.is_safe("ls -la") is True
     assert gate.is_safe("echo hello") is True
     assert gate.is_safe("pwd") is True
-    
+
     # Not whitelisted -> false
     assert gate.is_safe("rm -rf /") is False
     assert gate.is_safe("sudo rm file") is False
     assert gate.is_safe("format C:") is False
-    
+
     # Metacharacters -> false
     assert gate.is_safe("echo 'hello' > /dev/sda") is False
     assert gate.is_safe("echo test | bash") is False
